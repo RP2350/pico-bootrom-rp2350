@@ -55,11 +55,6 @@ varm_to_native_nsboot_init:
 native_nsboot_init:
     bx lr
 
-SC_OR_VARM_STUB(flash_abort)
-b.n sc_or_varm_common
-SC_OR_VARM_STUB(otp_access)
-b.n sc_or_varm_common
-
 #if COMPRESS_TEXT
 .global poor_mans_text_decompress
 .type poor_mans_text_decompress,%function
@@ -98,6 +93,18 @@ poor_mans_text_decompress:
 #else
 #error WHY NOT?
 #endif
+
+// this is where the USB IRQ is in the vector table
+// (and must be at offset 0x78 from a 128 byte aligned boundary)
+.p2align 2
+.global __irq14_vector
+__irq14_vector:
+    .word usb_irq_handler
+
+SC_OR_VARM_STUB(flash_abort)
+b.n sc_or_varm_common
+SC_OR_VARM_STUB(otp_access)
+b.n sc_or_varm_common
 
 // char *write_msb_hex_chars(__unused char *dest, __unused uint32_t val, __unused int count)
 .global write_msb_hex_chars
@@ -143,14 +150,6 @@ sc_or_varm_reboot:
 1:
     pop {r4, r5, pc}
 
-// (there is only one word literal; put it here to get an extra +4 offset on the IRQ vector)
-.ltorg
-// this is where the USB IRQ is in the vector table
-// (and must be at offset 0x78 from a 128 byte aligned boundary)
-.p2align 2
-.global __irq14_vector
-__irq14_vector:
-    .word usb_irq_handler
 
 VARM_TO_MULTIPLEX_PREAMBLE(native_usb_irq_enable)
 VARM_TO_MULTIPLEX_PREAMBLE(native_usb_packet_done)
@@ -210,7 +209,7 @@ _str_rp2350:
 _str_rpi_2:
 .asciz "RPI"
 .asciz "2"
-.byte 'c', 'r', 'i', 'v', 'e', 'n', 's', 0
+.byte 0x63, 0x72, 0x69, 0x76, 0x65, 0x6e, 0x73
 #endif
 
 .align 2

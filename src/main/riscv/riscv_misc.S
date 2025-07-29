@@ -205,4 +205,6 @@ s_native_crit_xip_cache_maintenance:
     sb   a0,0(a0)
     addi a0,a0,8
     bltu a0, a1, 1b
+    // note that caller expects 0x1c000000 in a0, which we actually give, but
+    // only for RCP assertion so doesn't matter anyway
     ret

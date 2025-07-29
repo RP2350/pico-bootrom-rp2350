@@ -183,7 +183,7 @@ static __force_inline uint32_t hx_bit_pattern_true(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = HX_BIT_PATTERN_TRUE;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c0, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c0, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -194,7 +194,7 @@ static __force_inline uint32_t hx_bit_pattern_false(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = HX_BIT_PATTERN_FALSE;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c1, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c1, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -205,7 +205,7 @@ static __force_inline uint32_t hx_bit_pattern_xor(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = HX_UINT32_XOR;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c2, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c2, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -216,7 +216,7 @@ static __force_inline uint32_t hx_bit_pattern_e100e1(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = 0xe100e1;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c3, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c3, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -227,7 +227,7 @@ static __force_inline uint32_t hx_bit_pattern_1e001e(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = 0x1e001e;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c4, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c4, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -238,7 +238,7 @@ static __force_inline uint32_t hx_bit_pattern_xor_sig_verified(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = HX_XOR_SIG_VERIFIED;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c5, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c5, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -249,7 +249,7 @@ static __force_inline hx_xbool hx_sig_verified_false(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc.v = HX_BIT_PATTERN_FALSE ^ HX_XOR_SIG_VERIFIED;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c6, #0\n" : "=r" (rc.v));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c6, #0\n" : [rc] "=r" (rc.v));
 #endif
     return rc;
 }
@@ -260,7 +260,7 @@ static __force_inline uint32_t hx_bit_pattern_xor_key_match(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = HX_XOR_KEY_MATCH;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c7, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c7, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -271,7 +271,8 @@ static __force_inline hx_xbool hx_key_match_false(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc.v = HX_BIT_PATTERN_FALSE ^ HX_XOR_KEY_MATCH;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c8, #0\n" : "=r" (rc.v));
+    // note this implementation is inlined directly in varm_blocks if it ever changes for some reason!
+    rcp_asm ("mrc p7, #7, %[rc], c0, c8, #0\n" : [rc] "=r" (rc.v));
 #endif
     return rc;
 }
@@ -283,7 +284,7 @@ static __force_inline uint32_t hx_bit_pattern_xor_secure(void) {
 //    // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
 //    rc = HX_XOR_SECURE;
 //#else
-//    rcp_asm ("mrc p7, #7, %0, c0, c6, #0\n" : "=r" (rc));
+//    rcp_asm ("mrc p7, #7, %[rc], c0, c6, #0\n" : [rc] "=r" (rc));
 //#endif
     return rc;
 }
@@ -292,10 +293,10 @@ static __force_inline hx_xbool hx_sig_verified_true(void) {
     hx_xbool rc;
 #if __ARM_ARCH_8M_MAIN__
     // the constant is not available via mov.w, so lets fabricate it (we shouldn't store it in the binary)
-    rcp_asm ("mrc p7, #7, %0, c0, c0, #0\n" : "=r" (rc.v));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c0, #0\n" : [rc] "=r" (rc.v));
     rc.v ^= HX_XOR_SIG_VERIFIED;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c6, #0\n" : "=r" (rc.v));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c6, #0\n" : [rc] "=r" (rc.v));
 #endif
     return rc;
 }
@@ -306,7 +307,7 @@ static __force_inline hx_xbool hx_otp_secure_true(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc.v = HX_BIT_PATTERN_TRUE ^ HX_XOR_OTP_SECURE;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c9, #0\n" : "=r" (rc.v));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c9, #0\n" : [rc] "=r" (rc.v));
 #endif
     return rc;
 }
@@ -317,7 +318,7 @@ static __force_inline uint32_t hx_otp_secure_xor(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = HX_XOR_OTP_SECURE;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c10, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c10, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -328,7 +329,7 @@ static __force_inline uint32_t hx_bit_pattern_c3c3c3c3(void) {
     // note on ARMv8-m main; we want to expose the real value so that it can be used in immediate operands
     rc = 0xc3c3c3c3;
 #else
-    rcp_asm ("mrc p7, #7, %0, c0, c11, #0\n" : "=r" (rc));
+    rcp_asm ("mrc p7, #7, %[rc], c0, c11, #0\n" : [rc] "=r" (rc));
 #endif
     return rc;
 }
@@ -398,8 +399,8 @@ static __force_inline hx_xbool make_hx_xbool2(bool value1, bool value2, uint32_t
     hx_xbool rc = {xor};
     pico_default_asm(
             "bl sonly_varm_make_hx_bool_impl\n"
-            "eors %1, r0\n"
-    : "+l" (r0), "+l" (rc.v), "+l" (r1)
+            "eors %[rc], r0\n"
+    : "+l" (r0), [rc] "+l" (rc.v), "+l" (r1)
     :
     : "ip", "lr", "cc"
     );
@@ -412,8 +413,8 @@ static __force_inline hx_xbool make_hx_xbool2_u(uint32_t value1, uint32_t value2
     hx_xbool rc = {xor};
     pico_default_asm(
         "bl sonly_varm_make_hx_bool_impl\n"
-        "eors %1, r0\n"
-    : "+l" (r0), "+l" (rc.v), "+l" (r1)
+        "eors %[rc], r0\n"
+    : "+l" (r0), [rc] "+l" (rc.v), "+l" (r1)
     :
     : "ip", "lr", "cc"
     );
@@ -514,9 +515,9 @@ static __force_inline hx_bool hx_not(hx_bool v) {
     hx_bool rc = { hx_bit_pattern_not() };
     // make sure we EOR into the invalid bit pattern
     pico_default_asm_volatile(
-        "eors %0, %1\n"
-        : "+l" (rc.v)
-        : "l" (v.v)
+        "eors %[rc], %[v]\n"
+        : [rc] "+l" (rc.v)
+        : [v] "l" (v.v)
         : "cc"
     );
     return rc;
@@ -526,25 +527,30 @@ static __force_inline hx_bool hx_notx(hx_xbool v, uint32_t xor) {
     hx_bool rc = { hx_bit_pattern_not() ^ xor };
     // make sure we EOR into the invalid bit pattern
     pico_default_asm_volatile(
-        "eors %0, %1\n"
-        : "+l" (rc.v)
-        : "l" (v.v)
+        "eors %[rc], %[v]\n"
+        : [rc] "+l" (rc.v)
+        : [v] "l" (v.v)
         : "cc"
     );
     return rc;
 }
 
-// same as hx_notx but useful to save code space if xor and base_xor result in close (-128 -> +127) NOT constantw
+// same as hx_notx but useful to save code space if xor and base_xor result in close (-128 -> +127) NOT constant
 static __force_inline hx_bool hx_notx_constant_diff(hx_xbool v, uint32_t xor, uint32_t base_xor) {
-    hx_bool rc = { (__get_opaque_value(HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ base_xor) +
-                    ((HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ xor) -
-                     (HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ base_xor)))
+    // hx_bool rc = { (__get_opaque_value(HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ base_xor) +
+    //                 ((HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ xor) -
+    //                  (HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ base_xor)))
+    // };
+    (void)base_xor;
+    hx_bool rc = {
+        __get_opaque_value(HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE) +
+            (HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ xor) - (HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE)
     };
     // make sure we EOR into the invalid bit pattern
     pico_default_asm_volatile(
-        "eors %0, %1\n"
-        : "+l" (rc.v)
-        : "l" (v.v)
+        "eors %[rc], %[v]\n"
+        : [rc] "+l" (rc.v)
+        : [v] "l" (v.v)
         : "cc"
     );
     return rc;
@@ -556,24 +562,25 @@ static __force_inline hx_bool hx_not_checked(hx_bool v) {
     hx_bool rc = { hx_bit_pattern_not() };
     // make sure we EOR into the invalid bit pattern
     pico_default_asm_volatile(
-        "eors %0, %1\n"
-        : "+l" (rc.v)
-        : "l" (v.v)
+        "eors %[rc], %[v]\n"
+        : [rc] "+l" (rc.v)
+        : [v] "l" (v.v)
         : "cc"
     );
     return rc;
 }
 
+
 static __force_inline hx_bool hx_and_notb(hx_bool a, bool b) {
     pico_default_asm(
-        "orrs %0, %1\n"
-        "lsls %1, #31\n"
-        "adds %1, %0\n"
+        "orrs %[a], %[b]\n"
+        "lsls %[b], #31\n"
+        "adds %[b], %[a]\n"
         "bcc 1f\n"
-        "adds %0, %[delta]\n"
+        "adds %[a], %[delta]\n"
         "1:\n"
-        : "+l" (a.v), "+l" (b)
-        : [delta] "r" (HX_BIT_PATTERN_FALSE - HX_BIT_PATTERN_TRUE - 1)
+        : [a] "+l" (a.v), [b] "+l" (b)
+        : [delta] "l" (HX_BIT_PATTERN_FALSE - HX_BIT_PATTERN_TRUE - 1)
         : "cc"
     );
     return a;
@@ -582,9 +589,9 @@ static __force_inline hx_bool hx_and_notb(hx_bool a, bool b) {
 static __force_inline hx_bool hx_xbool_to_bool(hx_xbool b, uint32_t xor) {
     hx_bool rc = {xor};
     pico_default_asm_volatile(
-        "eors %0, %1\n"
-        : "+l" (rc.v)
-        : "l" (b.v)
+        "eors %[rc], %[b]\n"
+        : [rc] "+l" (rc.v)
+        : [b] "l" (b.v)
         : "cc"
     );
     return rc;
@@ -616,13 +623,13 @@ static __force_inline void hx_assert_notx_orx_true_dup_checked(hx_xbool a, uint3
 static __force_inline hx_bool hx_or(hx_bool a, hx_bool b) {
     // assume we check this later... if it was invalid before, it is invalid after
     pico_default_asm(
-        "ands %0, %1\n"
+        "ands %[a], %[b]\n"
         "bne 1f\n"
-        "mov.w %1, %[_HX_BIT_PATTERN_TRUE]\n"
-        "adds %0, %1\n"
+        "mov.w %[b], %[_HX_BIT_PATTERN_TRUE]\n"
+        "adds %[a], %[b]\n"
         "1:\n"
-        : "+l" (a.v)
-        : "l" (b.v), [_HX_BIT_PATTERN_TRUE] "i" (HX_BIT_PATTERN_TRUE)
+        : [a] "+l" (a.v)
+        : [b] "l" (b.v), [_HX_BIT_PATTERN_TRUE] "i" (HX_BIT_PATTERN_TRUE)
         : "cc"
     );
     return a;
@@ -697,18 +704,7 @@ static __force_inline void hx_assert_equal2i(uint32_t a, uint32_t b) {
 
 static __force_inline hx_uint32_t make_hx_uint32(uint32_t value) { hx_uint32_t rc = { value, value ^ hx_bit_pattern_xor()}; return rc; }
 static __force_inline hx_uint32_t make_hx_uint32_2(uint32_t value1, uint32_t value2) { hx_uint32_t rc = { value1, value2 ^ hx_bit_pattern_xor()}; return rc; }
-static __force_inline hx_uint32_t make_hx_uint32_minus1_m33(void) {
-    hx_uint32_t rc;
-    pico_default_asm(
-        ".cpu cortex-m33\n"
-        "mvns %0, #1\n"
-        "eors %1, %2\n"
-        ".cpu cortex-m23\n"
-        : "=l" (rc.v), "=l" (rc.p)
-        : "i" (HX_UINT32_XOR)
-        );
-    return rc;
-}
+
 static __force_inline void hx_check_uint32(hx_uint32_t v) {
     rcp_ivalid(v.v, v.p);
 }
@@ -754,7 +750,7 @@ static __force_inline uint32_t boot_flag_selector(uint8_t bit) {
 
 // to save space, we preserve all registers across this call, and take the hit in s_varm_step_safe_hx_get_boot_flag_impl
 // (added benefit the argument to this r0 is not a valid result hx_bool, so skipping the call won't help you
-static __force_inline hx_xbool hx_step_safe_get_boot_flagx(uint8_t bit) {
+static __force_inline hx_xbool call_hx_step_safe_get_boot_flagx(uint8_t bit) {
     // we include the bit pattern
     register hx_xbool r0 asm("r0") = { .v = boot_flag_selector(bit) };
     pico_default_asm_volatile(
@@ -766,7 +762,7 @@ static __force_inline hx_xbool hx_step_safe_get_boot_flagx(uint8_t bit) {
     return r0;
 }
 
-static __force_inline hx_bool hx_step_safe_get_boot_flag(uint8_t bit) {
+static __force_inline hx_bool call_hx_step_safe_get_boot_flag(uint8_t bit) {
     // we include the bit pattern
     register hx_bool r0 asm("r0") = { .v = boot_flag_selector(bit) };
     pico_default_asm_volatile(
@@ -798,14 +794,14 @@ static __force_inline uint32_t __get_opaque_hx_value(hx_uint32_t v) {
 uint32_t varm_callable(s_native_step_safe_crit_mem_erase_by_words_impl)(uintptr_t start, uint MUST_be_zero, uint32_t byte_count);
 uint32_t varm_callable(s_native_crit_mem_copy_by_words_impl)(uint32_t *dest, const uint32_t *src, uint32_t byte_count);
 #if !defined(__riscv) && !defined(__ARM_ARCH_8M_MAIN__)
-static __force_inline uint s_varm_step_safe_crit_mem_erase_by_words(uintptr_t start, uint32_t byte_count, bool extra_assert) {
+static __force_inline uint call_s_varm_step_safe_crit_mem_erase_by_words(uintptr_t start, uint32_t byte_count, bool extra_assert) {
     uint bytes4 = varm_to_s_native_step_safe_crit_mem_erase_by_words_impl(start, 0, byte_count);
     hx_assert_equal2i(bytes4, byte_count);
     if (extra_assert) hx_assert_equal2i(byte_count, bytes4);
     return bytes4;
 }
 
-static __force_inline uint s_varm_step_safe_crit_mem_erase_by_words_const_size(uintptr_t start, uint32_t byte_count, bool extra_assert) {
+static __force_inline uint call_s_varm_step_safe_crit_mem_erase_by_words_const_size(uintptr_t start, uint32_t byte_count, bool extra_assert) {
     register uintptr_t r0 asm ("r0") = start;
     register uintptr_t r1 asm ("r1") = 0;
     if (byte_count > 255) {
@@ -832,28 +828,28 @@ static __force_inline uint s_varm_step_safe_crit_mem_erase_by_words_const_size(u
     return r0;
 }
 
-static __force_inline uint s_varm_crit_mem_copy_by_words(uint32_t *dest, const uint32_t *src, uint32_t byte_count) {
+static __force_inline uint call_s_varm_crit_mem_copy_by_words(uint32_t *dest, const uint32_t *src, uint32_t byte_count) {
     uint bytes4 = varm_to_s_native_crit_mem_copy_by_words_impl(dest, src, byte_count);
     hx_assert_equal2i(bytes4, byte_count);
     return bytes4;
 }
 #else
 #if !defined(__riscv)
-static __force_inline uint s_native_crit_step_safe_mem_erase_by_words(uintptr_t start, uint32_t byte_count, bool extra_assert) {
+static __force_inline uint call_s_native_crit_step_safe_mem_erase_by_words(uintptr_t start, uint32_t byte_count, bool extra_assert) {
     uint bytes4 = s_native_step_safe_crit_mem_erase_by_words_impl(start, 0, byte_count);
     hx_assert_equal2i(bytes4, byte_count);
     if (extra_assert) hx_assert_equal2i(byte_count, bytes4);
     return bytes4;
 }
 
-static __force_inline uint s_native_crit_step_safe_mem_erase_by_words_const_size(uintptr_t start, uint32_t byte_count, bool extra_assert) {
+static __force_inline uint call_s_native_crit_step_safe_mem_erase_by_words_const_size(uintptr_t start, uint32_t byte_count, bool extra_assert) {
     uint bytes4 = s_native_step_safe_crit_mem_erase_by_words_impl(start, 0, byte_count);
     hx_assert_equal2i(bytes4, byte_count);
     if (extra_assert) hx_assert_equal2i(byte_count, bytes4);
     return bytes4;
 }
 
-static __force_inline uint s_native_crit_mem_copy_by_words(uint32_t *dest, const uint32_t *src, uint32_t byte_count) {
+static __force_inline uint call_s_native_crit_mem_copy_by_words(uint32_t *dest, const uint32_t *src, uint32_t byte_count) {
     uint bytes4 = s_native_crit_mem_copy_by_words_impl(dest, src, byte_count);
     hx_assert_equal2i(bytes4, byte_count);
     return bytes4;

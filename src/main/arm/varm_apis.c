@@ -40,10 +40,6 @@ static_assert(BOOT_TYPE_BOOTSEL == REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL, "");
 static_assert(BOOT_TYPE_RAM_IMAGE == REBOOT2_FLAG_REBOOT_TYPE_RAM_IMAGE, "");
 static_assert(BOOT_TYPE_FLASH_UPDATE == REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE, "");
 
-static __force_inline uint inline_picoboot_reboot2_cmd_reboot_type(uint32_t flags) {
-    return flags & REBOOT2_TYPE_MASK;
-}
-
 // note flags has the reboot_type increased by 1
 int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_ms, uint32_t p0, uint32_t p1, uint32_t flags2) {
     canary_entry(S_VARM_API_REBOOT);
@@ -64,8 +60,8 @@ int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_m
     // note we use pc variable as the value, as we will set it to 0 and then -2 which are both invalid
     // watchdog boot PC values if someone tries to reboot (will cause a no-thumb-bit fault after reboot)
     pico_default_asm_volatile(
-        "movs %0, #0\n"
-        : "=l" (pc)
+        "movs %[pc], #0\n"
+        : [pc] "=l" (pc)
         : : "cc"
     );
     *(io_rw_32 *)wctrl = pc;
@@ -95,20 +91,20 @@ int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_m
     // just check that our separate SUBs below aren't repeated
     static_assert((REBOOT2_FLAG_REBOOT_TYPE_PC_SP) -5 != 5, "");
     static_assert((REBOOT2_FLAG_REBOOT_TYPE_PC_SP) -5 != 7, "");
-    // we wnat to do an actual subtraction from 13, rather than a RSB which could be trivially skipped
+    // we want to do an actual subtraction from 13, rather than a RSB which could be trivially skipped
     pico_default_asm_volatile(
-            "subs %0, #%c[TYPE_PC_SP]- 5\n" // split sub over two instructions to make skipping harder
-            "subs %0, #5\n"
-            "subs %1, #%c[TYPE_PC_SP] - 7\n" // split sub over two instructions and combine with using two different subs above
-            "lsls %0, #28\n"
-            "subs %1, #7\n"
-            "lsrs %0, #28\n"
-            "lsls %1, #28\n"
+            "subs %[rtype_adj_1], #%c[TYPE_PC_SP]- 5\n" // split sub over two instructions to make skipping harder
+            "subs %[rtype_adj_1], #5\n"
+            "subs %[rtype_adj_2], #%c[TYPE_PC_SP] - 7\n" // split sub over two instructions and combine with using two different subs above
+            "lsls %[rtype_adj_1], #28\n"
+            "subs %[rtype_adj_2], #7\n"
+            "lsrs %[rtype_adj_1], #28\n"
+            "lsls %[rtype_adj_2], #28\n"
             "lsls %[pc], %[flags], #28\n" // pc was 0xfffffffe, so if this is not skipped pc will definitely be even, if skipped then...
-            "lsrs %1, #28\n"
+            "lsrs %[rtype_adj_2], #28\n"
             "lsrs %[reboot_type_plus_one], %[pc], #28\n" // ... this would be 0xf
-            : "+l" (reboot_type_plus_1_minus_pc_sp),
-              "+l" (reboot_type_plus_1_minus_pc_sp2),
+            : [rtype_adj_1] "+l" (reboot_type_plus_1_minus_pc_sp),
+              [rtype_adj_2] "+l" (reboot_type_plus_1_minus_pc_sp2),
               [reboot_type_plus_one] "=l" (reboot_type_plus_one),
               [pc] "+l" (pc)
             : [flags] "r" (flags), [flags2] "r" (flags2), [TYPE_PC_SP] "i" (REBOOT2_FLAG_REBOOT_TYPE_PC_SP)
@@ -136,9 +132,9 @@ int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_m
     // keep pc alive from above, and make magic non const to compiler.
     // we also deliberately do two loads
     pico_default_asm_volatile(
-        "ldr %0, =%c2\n"
-        "ldr %1, =%c2\n"
-        : "+l" (pc), "=l" (magic)
+        "ldr %[pc], =%c2\n"
+        "ldr %[magic], =%c2\n"
+        : [pc] "+l" (pc), [magic] "=l" (magic)
         : "i" (REBOOT_TO_MAGIC_PC)
         );
     // double check it got set correctly
@@ -194,9 +190,9 @@ int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_m
         // use assembly to load constant, otherwise GCC does not share the literal pool entry with asm above
         // which uses REBOOT_TO_MAGIC_PC (the same values as VECTORED_BOOT_MAGIC)
         pico_default_asm_volatile(
-            "ldr %0, =%c1\n"
-            : "=r" (tmp)
-            : "i" (VECTORED_BOOT_MAGIC)
+            "ldr %[tmp], =%c[magic]\n"
+            : [tmp]   "=r" (tmp)
+            : [magic] "i"  (VECTORED_BOOT_MAGIC)
             );
         watchdog_hw->scratch[6] = p1;
         watchdog_hw->scratch[7] = pc;
@@ -281,11 +277,24 @@ int __exported_from_arm s_varm_api_get_sys_info(uint32_t *out_buffer, uint32_t o
     lens32[2] = 0x0;
 
     uint32_t *output_ptr = outputs + 1;
-    typeof(bootram->always) *always = __get_opaque_ptr(&bootram->always);
+    typeof(bootram->always) *always = get_always_ptr();
     if (flags & SYS_INFO_CHIP_INFO) {
         // first three counts are 1 (returned flags), 1 (package sel), 2 (chip id)
         lens32[0] = 0x10000;
-        *output_ptr++ = SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET;
+        uint package_sel_ptr;
+#if !ASM_SIZE_HACKS || SYSINFO_PACKAGE_SEL_OFFSET != 4
+        package_sel_ptr = SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET;
+#else
+        static_assert(SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET == 0x40000004, "");
+        pico_default_asm_volatile(
+                "movs %0, 0x44\n"
+                "rors %0, %0\n"
+                : "=l" (package_sel_ptr)
+                :
+                : "cc"
+        );
+#endif
+        *output_ptr++ = package_sel_ptr;
         *output_ptr++ = (uintptr_t)&always->chip_id;
     }
     io_ro_32 *otp_critical = __get_opaque_ptr(&otp_hw->critical);
@@ -352,8 +361,7 @@ int __exported_from_arm s_varm_api_get_partition_table_info(uint32_t *out_buffer
     int negrc;
     // regalloc: best to leave this alone as the compiler already wants all of r4-r7
     canary_entry(S_VARM_API_GET_PARTITION_TABLE_INFO);
-    uintptr_t pt_addr = __get_opaque_ptr(BOOTRAM_BASE + offsetof(bootram_t, always.partition_table));
-    resident_partition_table_t *partition_table = (resident_partition_table_t *)pt_addr;
+    resident_partition_table_t *partition_table = get_partition_table_ptr();
     if (!inline_s_is_resident_partition_table_loaded_pt(partition_table)) {
         negrc = -BOOTROM_ERROR_PRECONDITION_NOT_MET;
         goto get_partition_table_info_done;
@@ -372,7 +380,7 @@ int __exported_from_arm s_varm_api_get_partition_table_info(uint32_t *out_buffer
         if (out_buffer_word_size >= 4) {
             adjusted_out_buffer[0] = partition_table->partition_count |
                                      (partition_table->secure_item_address != 0 ? 256 : 0);
-            *(resident_partition_t *)&adjusted_out_buffer[1] = s_varm_flashperm_get_default_partition();
+            *(resident_partition_t *)&adjusted_out_buffer[1] = inline_s_varm_flashperm_get_default_partition(partition_table);
         }
         adjusted_out_buffer += 3;
     }
@@ -397,32 +405,40 @@ int __exported_from_arm s_varm_api_get_partition_table_info(uint32_t *out_buffer
     negrc = -rc;
     get_partition_table_info_done:
     negrc = -negrc;
+    // we have a 2 byte alignment hole and we can fall thru to s_varm_api_set_rom_callback
+    // if we skipped the return below, so let's clear r1 which is the pointer to install
+    pico_default_asm_volatile( "movs r1, #0\n" : : : "r1", "cc");
     canary_exit_return(S_VARM_API_GET_PARTITION_TABLE_INFO, negrc);
 }
 
 uint __exported_from_arm s_varm_step_safe_api_crit_bootrom_state_reset(uint sr_type) {
     canary_entry_reg(ip, S_VARM_STEP_SAFE_API_CRIT_BOOTROM_STATE_RESET);
-    // Note BOOTROM_STATE_RESET_CURRENT_CORE can't be handled inside of
+    // Note BOOTROM_STATE_RESET_CURRENT_CORE can't be handled inside
     // varmulet, as it's attempting to reset varmulet state which is actually
     // saved/restored in varm_wrapper. It also should do nothing on Arm. See
     // RISC-V s_riscv_bootrom_state_reset asm routine.
     uint i = sr_type;
     if (sr_type & BOOTROM_STATE_RESET_OTHER_CORE) {
-        int other_core = !get_core_num();
-        static_assert(sizeof(bootram->runtime.core[other_core].arm) == 0, "");
+        uint own_core = get_core_num();
+        static_assert(sizeof(bootram->runtime.core[own_core].arm) == 0, "");
         // note: arm core 1 may use this area for stack when launched from NS core 0
-        if (otp_hw->archsel_status & (1u << other_core)) {
+
+        // we are checking if the other core is RISC-V
+        // own_core 0, want core 1; so status << 30 puts bit 1 in bit 31
+        // own_core 1, want core 0; so status << 31 puts bit 0 in bit 31
+        if ((int32_t)(otp_hw->archsel_status << (30 + own_core)) < 0) {
             // bootram->runtime.core[other_core].riscv.varmulet_enclosing_cpu = 0;
             // bootram->runtime.core[other_core].riscv.varmulet_user_stack_size = 0;
-            uint32_t *user_stack_size = __get_opaque_ptr(&bootram->runtime.core[0].riscv.varmulet_user_stack_size);
-            if (other_core) user_stack_size += sizeof(bootram->runtime.core[0]) / 4;
+            uint32_t *user_stack_size_ptr = __get_opaque_ptr(&bootram->runtime.core[0].riscv.varmulet_user_stack_size);
+            // if own_core == 0, need to offset for core 1
+            if (!own_core) user_stack_size_ptr += sizeof(bootram->runtime.core[0]) / 4;
 
             static_assert(offsetof(bootram_t, runtime.core[0].riscv.varmulet_enclosing_cpu) ==
                           offsetof(bootram_t, runtime.core[0].riscv.varmulet_user_stack_size) + 4, "");
-            bootrom_assert(MISC, &user_stack_size[1] == (uint32_t *)&bootram->runtime.core[other_core].riscv.varmulet_enclosing_cpu);
-            user_stack_size[1] = 0;
-            bootrom_assert(MISC, user_stack_size == &bootram->runtime.core[other_core].riscv.varmulet_user_stack_size);
-            *user_stack_size = 0;
+            bootrom_assert(MISC, &user_stack_size_ptr[1] == (uint32_t *)&bootram->runtime.core[!own_core].riscv.varmulet_enclosing_cpu);
+            user_stack_size_ptr[1] = 0;
+            bootrom_assert(MISC, user_stack_size_ptr == &bootram->runtime.core[!own_core].riscv.varmulet_user_stack_size);
+            *user_stack_size_ptr = 0;
         }
     }
     if (sr_type & BOOTROM_STATE_RESET_GLOBAL_STATE) {
@@ -438,7 +454,7 @@ uint __exported_from_arm s_varm_step_safe_api_crit_bootrom_state_reset(uint sr_t
                 "stmia r0!, {r0-r7}\n" :
                 "+l" (r0)
                 );
-        typeof (bootram->always) *always = __get_opaque_ptr(&bootram->always);
+        typeof (bootram->always) *always = get_always_ptr();
 #if 1
         // avoid compiler use of memset
         static_assert(count_of(always->ns_api_permissions) == 8, "");
@@ -446,15 +462,19 @@ uint __exported_from_arm s_varm_step_safe_api_crit_bootrom_state_reset(uint sr_t
         uint t1 = (uintptr_t)always->ns_api_permissions;
         pico_default_asm_volatile("str %0, [%1]\n"
                                   "str %0, [%1, 4]\n"
+                                  "str %0, [%1]\n" // second write to fill alignment hole
             : : "l" (t0), "l" (t1));
 #else
         for (uint i = 0; i < BOOTROM_NS_API_COUNT; i++) {
             always->ns_api_permissions[i] = 0xc3;
         }
 #endif
+        bootrom_api_callback_generic_t zero = __get_opaque_ptr((bootrom_api_callback_generic_t)0);
         for (i = 0; i < BOOTROM_API_CALLBACK_COUNT; i++) {
-            always->callbacks[i] = 0;
+            always->callbacks[i] = zero;
         }
+        // note we return BOOTROM_API_CALLBACK_COUNT (1) in this code path
+        i = (uint)zero + BOOTROM_API_CALLBACK_COUNT;
     }
     canary_exit_return(S_VARM_STEP_SAFE_API_CRIT_BOOTROM_STATE_RESET, i);
 }
@@ -515,9 +535,10 @@ int __exported_from_arm s_varm_api_chain_image(uint8_t *workarea_base, uint32_t 
         rc = (intptr_t)scan_workarea;
         goto chain_image_done;
     }
-    s_varm_crit_get_non_booting_boot_scan_context(scan_workarea,
-                                                  true, // executable_image_def_only
-                                                  false); // verify_without_signatures
+    hx_bool hx_false_value = inline_s_varm_crit_get_non_booting_boot_scan_context(scan_workarea,
+                                                         true, // executable_image_def_only
+                                                         false); // verify_without_signatures
+    hx_assert_false(hx_false_value);
     boot_scan_context_t *ctx = &scan_workarea->ctx_holder.ctx;
 
     // if window_base < 0 then it means the value needs to be negated,  and also used as the flash_update_partition
@@ -533,7 +554,7 @@ int __exported_from_arm s_varm_api_chain_image(uint8_t *workarea_base, uint32_t 
     //    int8_t flash_mode;
     //    uint8_t flash_clkdiv;
     static_assert(offsetof(bootram_t, always.boot_type_and_diagnostics) < offsetof(bootram_t, always.partition_table), "");
-    uintptr_t bootram_type_and_diagnostics = BOOTRAM_BASE + offsetof(bootram_t, always.boot_type_and_diagnostics);
+    uintptr_t bootram_type_and_diagnostics = (uintptr_t)get_always_boot_type_and_diagnostics_ptr();
     bootram_type_and_diagnostics = __get_opaque_value(bootram_type_and_diagnostics);
 
     resident_partition_table_t *pt = (resident_partition_table_t *)
@@ -591,8 +612,8 @@ int s_varm_crit_get_pt_partition_info(uint32_t *out_buffer, uint32_t out_buffer_
             goto done;
         }
         uint item_pos = 0;
-        uint item_size = inline_decode_item_size(pt_item_data[item_pos++]);
-        item_pos++; // skip un-permissioned_space flags
+        uint item_size = call_decode_item_size(pt_item_data[item_pos++]);
+        item_pos++; // skip unpermissioned-space flags
         sb_sha256_state_t sha256;
         sb_sha256_init(&sha256);
         printf("  partitions:\n");
@@ -736,8 +757,8 @@ int __exported_from_arm s_varm_api_pick_ab_partition(uint8_t *workarea_base, uin
         partition_a_num = (uint)BOOTROM_ERROR_PRECONDITION_NOT_MET;
         goto pick_ab_partition_done;
     }
-    bootrom_assert(MISC, inline_s_is_resident_partition_table_loaded());
-    resident_partition_table_t *pt = &bootram->always.partition_table;
+    resident_partition_table_t *pt = get_partition_table_ptr();
+    bootrom_assert(MISC, inline_s_is_resident_partition_table_loaded_pt(pt));
     if (partition_a_num >= pt->partition_count) {
         partition_a_num = (uint)BOOTROM_ERROR_INVALID_ARG;
         goto pick_ab_partition_done;

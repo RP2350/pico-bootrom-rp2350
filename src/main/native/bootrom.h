@@ -32,7 +32,6 @@
 #endif
 
 // store some variables at well known offsets so we can load them via offset from a zero register
-#define CPACR_OFFSET 0x34
 #define PARSED_BLOCK_LOOP_IMAGE_DEF_ROLLED_ENTRY_POINT_ADDR_OFFSET 0x4c
 #define RESIDENT_PARTITION_SIZE 8
 
@@ -71,6 +70,12 @@
 #define BOOTROM_MPU_REGION_SECURE_XN     3
 
 #define BOOTROM_MPU_REGION_COUNT         4
+
+#define XIP_CACHE_MAINTENANCE_OP_INVALIDATE_BY_SET_WAY 0
+#define XIP_CACHE_MAINTENANCE_OP_CLEAN_BY_SET_WAY 1
+#define XIP_CACHE_MAINTENANCE_OP_INVALIDATE_BY_ADDRESS 2
+#define XIP_CACHE_MAINTENANCE_OP_CLEAN_BY_ADDRESS 3
+#define XIP_CACHE_MAINTENANCE_OP_PIN_AT_ADDRESS 7
 
 #ifndef __ASSEMBLER__
 static_assert(sizeof(resident_partition_t) == RESIDENT_PARTITION_SIZE, "");
@@ -129,7 +134,6 @@ int s_varm_api_get_partition_table_info(uint32_t *out_buffer, uint32_t out_buffe
 
 // this is the internal method used by the previous
 int s_varm_crit_get_pt_partition_info(uint32_t *out_buffer, uint32_t out_buffer_word_size, uint32_t flags_and_partition, const uint32_t *pt_item_data, uint partition_count, bool first_load_from_buffer);
-int s_varm_ram_trash_get_uf2_target_partition(uint32_t family_id, resident_partition_t *partition_out);
 int s_varm_ram_trash_get_uf2_target_partition_workarea(uint32_t family_id, resident_partition_t *partition_out, uf2_target_workarea_t *uf2_target_workarea);
 
 int s_varm_api_get_sys_info(uint32_t *buffer, uint32_t buffer_size_words, uint32_t flags);
@@ -141,7 +145,7 @@ struct parsed_block_loop;
 void varm_callable(s_native_crit_init_default_xip_setup_and_enter_image_thunk)(/*bootrom_xip_mode_t*/int8_t mode, uint clkdiv,
     uint32_t pc, uint32_t sp, uint32_t sp_lim, uint32_t vector_table,
     struct parsed_block_loop *parsed_block_loop);
-void __attribute__((noreturn)) varm_callable(s_native_crit_launch_nsboot)(void);
+void varm_callable(s_native_crit_launch_nsboot)(void);
 
 void __attribute__((noreturn)) varm_and_native(dead)(void);
 void __attribute__((noreturn)) varm_and_native(wait_rescue)(void);

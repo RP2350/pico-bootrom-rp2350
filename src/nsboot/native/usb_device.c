@@ -130,11 +130,11 @@ static io_rw_32 *_usb_buf_ctrl_wide(const struct usb_endpoint *ep) {
     uint32_t num = ep->num * 8;
     io_rw_32 *p = &usb_dpram->ep_buf_ctrl[0].out;
     pico_default_asm(
-            "add %0, %2\n"
-            "cbz %1, 1f\n"
-            "subs %0, #4\n"
+            "add %[num], %[p]\n"
+            "cbz %[in], 1f\n"
+            "subs %[num], #4\n"
             "1:\n"
-            : "+&l" (num) : "l" (in), "r" (p)
+            : [num] "+&l" (num) : [in] "l" (in), [p] "r" (p)
             : "cc"
     );
     return (io_rw_32 *)num; // keep using r0
@@ -465,17 +465,21 @@ static void _usb_handle_transfer(uint ep_num, bool in, uint which) {
     }
 }
 
-// native ctz (we want to use m33 even on
+// native ctz (only used on M33-only or native RISC-V paths)
 static __force_inline uint native_ctz(uint32_t val) {
 #ifdef __riscv
+    // This just uses the correct instruction as long as Zbb is enabled
     return (uint)__builtin_ctz(val);
 #else
+    // Need to force the correct sequence as this doesn't exist in v8-M Base
     uint tmp;
     pico_default_asm(
             ".cpu cortex-m33\n"
-            "rbit %0, %1\n"
-            "clz %0, %0\n"
-            : "=r" (tmp): "r" (val)
+            "rbit %[tmp], %[val]\n"
+            "clz %[tmp], %[tmp]\n"
+            ".cpu cortex-m23\n"
+            : [tmp] "=r" (tmp)
+            : [val] "r" (val)
             );
     return tmp;
 #endif
@@ -717,7 +721,7 @@ static struct usb_endpoint *_usb_endpoint_init_internal(struct usb_endpoint *ep,
 
 #ifndef __riscv
 
-void usb_endpoint_hw_init(struct usb_endpoint *ep __comma_endpoint_callback_decl(data))
+struct usb_endpoint *usb_endpoint_hw_init(struct usb_endpoint *ep __comma_endpoint_callback_decl(data))
 {
     // ep->num should already be initialized (so no need to call usb_endpoint_number which gets it from the descriptor)
     uint ep_num = ep->num;
@@ -793,6 +797,7 @@ void usb_endpoint_hw_init(struct usb_endpoint *ep __comma_endpoint_callback_decl
         tmp[1] = reg ^ reg0;
 #endif
     }
+    return ep;
 }
 
 typedef void (*endpoint_callback)(struct usb_endpoint *endpoint __comma_endpoint_callback_decl(data));
@@ -1794,11 +1799,14 @@ struct usb_device *usb_device_init(const struct usb_device_descriptor *desc,
 #endif
 
     _device.next_buffer_offset = 0x100;
-    usb_endpoint_hw_init(arch_usb_get_control_in_endpoint() __comma_endpoint_callback_val(0));
+    // there are two control endpoints in an array
+    struct usb_endpoint *control_ep = arch_usb_get_control_endpoints();
+    control_ep = usb_endpoint_hw_init(control_ep __comma_endpoint_callback_val(0));
     _device.next_buffer_offset = 0x100;
-    usb_endpoint_hw_init(arch_usb_get_control_out_endpoint() __comma_endpoint_callback_val(0));
+    control_ep++;
+    usb_endpoint_hw_init(control_ep __comma_endpoint_callback_val(0));
     _device.next_buffer_offset = 0x180;
-    _usb_for_each_non_control_endpoint(P16_F(usb_endpoint_hw_init) __comma_endpoint_callback_val(0));
+    _usb_for_each_non_control_endpoint(P16_F_CAST(void (*)(struct usb_endpoint *), usb_endpoint_hw_init) __comma_endpoint_callback_val(0));
     return &_device;
 }
 

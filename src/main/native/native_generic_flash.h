@@ -67,16 +67,21 @@ void s_varm_api_crit_flash_flush_cache(void);
 void s_varm_crit_pin_xip_ram(void);
 #else
 // Annotated with correct (minimal) clobbers to save spill/fill at call site
-static __force_inline void s_varm_api_crit_flash_flush_cache(void) {
+//
+// note this actually returns 0x1c000000 + XIP_CACHE_MAINTENANCE_OP_INVALIDATE_BY_SET_WAY which is 0x1c000000
+static __force_inline uint32_t call_s_varm_api_crit_flash_flush_cache(void) {
+	register uint32_t r0 asm ("r0");
 	pico_default_asm_volatile (
 		"bl s_varm_api_crit_flash_flush_cache_impl\n"
-		: : : "r0", "r3", "ip", "lr", "cc"
+		: "=l" (r0)
+		: : "r3", "ip", "lr", "cc", "memory"
 	);
+	return r0;
 }
-static __force_inline void s_varm_crit_pin_xip_ram(void) {
+static __force_inline void call_s_varm_crit_pin_xip_ram(void) {
 	pico_default_asm_volatile (
 		"bl s_varm_crit_pin_xip_ram_impl\n"
-		: : : "r0", "r3", "ip", "lr", "cc"
+		: : : "r0", "r3", "ip", "lr", "cc", "memory"
 	);
 }
 #endif
@@ -96,7 +101,7 @@ static __force_inline uint inline_s_varm_flash_cs_from_offset(flash_offset_t off
 	OTP_DATA_FLASH_DEVINFO_CS1_SIZE_VALUE_NONE << OTP_DATA_FLASH_DEVINFO_CS1_SIZE_LSB \
 )
 
-static __force_inline uint32_t s_varm_flash_devinfo_get_size(uint cs) {
+static __force_inline uint32_t inline_s_varm_flash_devinfo_get_size(uint cs) {
 	uint shamt = OTP_DATA_FLASH_DEVINFO_CS0_SIZE_LSB + cs * (
 		OTP_DATA_FLASH_DEVINFO_CS1_SIZE_LSB - OTP_DATA_FLASH_DEVINFO_CS0_SIZE_LSB
 	);
@@ -107,14 +112,20 @@ static __force_inline uint32_t s_varm_flash_devinfo_get_size(uint cs) {
 	return size_bits == 0u ? 0u : (0x1000u << size_bits);
 }
 
-static __force_inline bool s_varm_flash_devinfo_get_d8h_supported(void) {
+static __force_inline bool inline_s_varm_flash_devinfo_get_d8h_supported(void) {
 	return gcc_avoid_single_movw_plus_ldr(bootram->always.zero_init.flash_devinfo) & OTP_DATA_FLASH_DEVINFO_D8H_ERASE_SUPPORTED_BITS;
 }
 
 // Return -1 if no CS1 device, otherwise return GPIO number
 static __force_inline int inline_s_varm_flash_devinfo_get_cs1_gpio(void) {
 	uint16_t devinfo = gcc_avoid_single_movw_plus_ldr(bootram->always.zero_init.flash_devinfo);
-	if ((devinfo & OTP_DATA_FLASH_DEVINFO_CS1_SIZE_BITS) == 0) {
+#if OTP_DATA_FLASH_DEVINFO_CS1_SIZE_MSB == 15
+	static_assert(sizeof(devinfo) == 2, "");
+	if (!(devinfo >> OTP_DATA_FLASH_DEVINFO_CS1_SIZE_LSB))
+#else
+	if ((devinfo & OTP_DATA_FLASH_DEVINFO_CS1_SIZE_BITS) == 0)
+#endif
+	{
 		return -1;
 	} else {
 		return (devinfo & OTP_DATA_FLASH_DEVINFO_CS1_GPIO_BITS) >> OTP_DATA_FLASH_DEVINFO_CS1_GPIO_LSB;

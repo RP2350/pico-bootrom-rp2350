@@ -288,7 +288,7 @@ static __force_inline uint8_t inline_s_executable_image_def_cpu_type(const parse
     return (image_def->image_type_flags & PICOBIN_IMAGE_TYPE_EXE_CPU_BITS) >> PICOBIN_IMAGE_TYPE_EXE_CPU_LSB;
 }
 
-static __force_inline uint16_t inline_decode_item_size(uint32_t item_header) {
+static __force_inline uint16_t call_decode_item_size(uint32_t item_header) {
 //    uint16_t size;
 //    if (item_header & 0x80) {
 //        size = (uint16_t)(item_header >> 8);
@@ -296,20 +296,8 @@ static __force_inline uint16_t inline_decode_item_size(uint32_t item_header) {
 //        size = (uint8_t)(item_header >> 8);
 //    }
 //    return size;
-#if 0
-    uint16_t rc;
-    pico_default_asm_volatile(
-        "lsrs %1, %0, #8\n"
-        "bcs  1f\n"
-        "uxtb %1, %1\n"
-        "1:\n"
-        "uxth %1, %1\n"
-        : "=l" (rc)
-        : "l" (item_header)
-        : "cc");
-    return rc;
-#else
     register uint32_t r0 asm ("r0") = item_header;
+    // Note the clobbers are pessimistic; GCC weirdly does better with more clobbers in this case
     pico_default_asm_volatile(
             "bl s_varm_decode_item_size_impl"
             : "+l" (r0)
@@ -317,7 +305,6 @@ static __force_inline uint16_t inline_decode_item_size(uint32_t item_header) {
             : "ip", "cc", "lr"
             );
     return (uint16_t)r0;
-#endif
 }
 
 void s_varm_crit_init_block_scan(block_scan_t *bs, const boot_scan_context_t *ctx, uint32_t window_rel_search_start_offset, uint32_t first_block_search_size);
@@ -332,7 +319,7 @@ void s_varm_crit_init_block_scan(block_scan_t *bs, const boot_scan_context_t *ct
  */
 int s_varm_crit_next_block(block_scan_t *bs);
 
-uint32_t *resolve_ram_or_absolute_flash_addr(uint32_t addr);
+uint32_t *inline_s_resolve_ram_or_absolute_flash_addr(uint32_t addr);
 
 // note anything less than 0, really
 #define FLASH_MODE_STATE_SEARCH_ENDED ((int8_t)-1)
@@ -355,7 +342,7 @@ int s_varm_crit_ram_trash_checked_ram_or_flash_window_launch(boot_scan_context_t
 void s_varm_crit_ram_trash_try_otp_boot(mpu_hw_t *mpu_on_arm, boot_scan_context_t *ctx);
 void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_t bootselFlags, uint serial_mode);
 bool s_varm_crit_search_window(const boot_scan_context_t *ctx, uint32_t range_base, uint32_t range_size, parsed_block_loop_t *parsed_block_loop);
-hx_bool s_varm_crit_get_non_booting_boot_scan_context(scan_workarea_t *scan_workarea, bool executable_image_def_only, bool verify_image_defs_without_signatures);
+hx_bool inline_s_varm_crit_get_non_booting_boot_scan_context(scan_workarea_t *scan_workarea, bool executable_image_def_only, bool verify_image_defs_without_signatures);
 // note this should not be called for flash images; call the flash specific version which does wome work prior to calling this
 int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, parsed_block_loop_t *parsed_block_loop);
 int s_varm_crit_ram_trash_verify_and_launch_flash_image(boot_scan_context_t *ctx, parsed_block_loop_t *parsed_block_loop);
@@ -371,7 +358,7 @@ static __force_inline bool s_varm_crit_parse_image_def(block_scan_t *bs, uint32_
 // clear and return the set alias to bootram->always.boot_diagnoistc if real = true
 // otherwise return a NULL Pointer (which is fine for writing to when we just
 // want to lose the results
-static __force_inline uint32_t *s_varm_init_diagnostic32(bool real) {
+static __force_inline uint32_t *call_s_varm_init_diagnostic32(bool real) {
     register uintptr_t r0 asm ("r0") = real;
     pico_default_asm_volatile(
             "bl s_varm_init_diagnostic32_impl\n"
@@ -414,12 +401,12 @@ static __force_inline bool inline_s_is_xip_ram(uint32_t addr) {
     return (addr >> 14) == (XIP_SRAM_BASE >> 14);
 }
 
-static __force_inline bool inline_s_is_resident_partition_table_loaded_pt(resident_partition_table_t *pt) {
+static __force_inline bool inline_s_is_resident_partition_table_loaded_pt(const resident_partition_table_t *pt) {
     return pt->loaded;
 }
 
 static __force_inline bool inline_s_is_resident_partition_table_loaded(void) {
-    return inline_s_is_resident_partition_table_loaded_pt(&bootram->always.partition_table);
+    return inline_s_is_resident_partition_table_loaded_pt(get_partition_table_ptr());
 }
 
 static __force_inline bool inline_s_partition_is_nsboot_writable(const resident_partition_t *partition) {
@@ -470,32 +457,6 @@ static __force_inline bool inline_s_partition_is_marked_bootable(const resident_
     return !(partition->permissions_and_flags & (PICOBIN_PARTITION_FLAGS_IGNORED_DURING_ARM_BOOT_BITS << cpu_type));
 }
 
-// static __force_inline void inline_s_set_romdata_ro_xn(mpu_hw_t *mpu_on_arm) {
-//     // Symbols from linker script:
-//     __unused extern char __start_of_secure_xn_plus_5;
-//     mpu_on_arm->rnr = BOOTROM_MPU_REGION_SECURE_XN;
-//     static_assert(((2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS) == 5, "");
-// //    mpu_on_arm->rbar = (uintptr_t)P16_D(__start_of_secure_xn) | (2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS;
-//     mpu_on_arm->rbar = (uintptr_t)P16_D(__start_of_secure_xn_plus_5);
-//     mpu_on_arm->rlar = (uintptr_t)BOOTROM_SG_START | M33_MPU_RLAR_EN_BITS;
-// }
-
-// Disable writes to the core 1 stack region of boot RAM, which is between
-// core 0 stack and "always" (also disable X permission, but this doesn't matter
-// since bootram is physically impossible to execute from due to bus architecture)
-static __force_inline void inline_s_set_core1_ro_xn(mpu_hw_t *mpu_on_arm) {
-    mpu_on_arm->rnr = BOOTROM_MPU_REGION_BOOTRAM_CORE1;
-    static_assert(((2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS) == 5, "");
-    // note this range isn't exact due to alignment (we round inwards) but it is still between the core 0 stack and our always data
-    uint32_t rbar = (((uintptr_t) &bootram->runtime.core[1] + HACK_STACK_WORDS * 4 + 0x1fu) & ~0x1fu) +
-                    ((2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS);
-    mpu_on_arm->rbar = rbar;
-    mpu_on_arm->rlar = __get_opaque_value(rbar) +
-                       (((uintptr_t) &bootram->always - 0x1fu) & ~0x1fu) + M33_MPU_RLAR_EN_BITS -
-                       ((((uintptr_t) &bootram->runtime.core[1] + HACK_STACK_WORDS * 4 + 0x1fu) & ~0x1fu) +
-                        ((2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS));
-}
-
 static __force_inline void inline_s_update_mpu(mpu_hw_t *mpu_on_arm, bool flash, bool write) {
     // note it is tempting to think of the regular RBAR and RLAR as index 0, however it is always selected by
     // the region number, whereas the aliases uses bit 2 of the region number only
@@ -510,7 +471,76 @@ static __force_inline void inline_s_update_mpu(mpu_hw_t *mpu_on_arm, bool flash,
     // rbar is actually an array of type
     // note 0u is r/w privileged only
     //      2u is r/o privlleged only
-    al_regions3[flash].rbar = (flash ? 0x10000000 : 0x20000000) | ((write?0u:2u) << M33_MPU_RBAR_AP_LSB) | (M33_MPU_RBAR_XN_BITS);
+    uint32_t rbar, tmp;
+    uint flags = ((write?0u:2u) << M33_MPU_RBAR_AP_LSB) | (M33_MPU_RBAR_XN_BITS);
+    if (flags == 1 || flags == 2) {
+        // we can make the address by shifting flags
+        uint shift;
+        if ((flags == 1 && flash) || (flags == 2 && !flash)) shift = 28;
+        else if (flags == 2 && flash) shift = 27;
+        else shift = 29;
+        pico_default_asm_volatile(
+            "movs %[rbar], %[flags]\n"
+            "movs %[rbar], %[flags]\n"
+            // |= flash ? 0x10000000 : 0x20000000
+            "lsls %[tmp], %[rbar], %[shift]\n"
+            "orrs %[rbar], %[tmp]\n"
+            : [rbar] "=l" (rbar), [tmp] "=l" (tmp)
+            : [flags] "i" (flags),
+              [shift] "i" (shift)
+            : "cc"
+        );
+    } else {
+        pico_default_asm_volatile(
+            "movs %[rbar], %[flags]\n"
+            "movs %[rbar], %[flags]\n"
+            // |= flash ? 0x10000000 : 0x20000000
+            "movs %[tmp], %[base_high]\n"
+            "lsls %[tmp], #28\n"
+            "orrs %[rbar], %[tmp]\n"
+            : [rbar] "=l" (rbar), [tmp] "=l" (tmp)
+            : [flags] "i" (flags),
+              [base_high] "i" (flash ? 0x1 : 0x2)
+            : "cc"
+        );
+    }
+
+    al_regions3[flash].rbar = rbar;
+}
+
+// more compact version which sets both to ro xn
+static __force_inline void inline_s_update_mpu_both(mpu_hw_t *mpu_on_arm, bool write) {
+    // note it is tempting to think of the regular RBAR and RLAR as index 0, however it is always selected by
+    // the region number, whereas the aliases uses bit 2 of the region number only
+
+    // for this reason we pick between regions 1 & 2 since these are always in view unless region number > 4
+    static_assert(BOOTROM_MPU_REGION_RAM == 1, "");
+    static_assert(BOOTROM_MPU_REGION_FLASH == 2, "");
+    volatile struct _rbar_rlar {
+        io_rw_32 rbar;
+        io_rw_32 rlar;
+    } *al_regions3 = (volatile struct _rbar_rlar *)(&mpu_on_arm->rbar + 2);
+    // rbar is actually an array of type
+    // note 0u is r/w privileged only
+    //      2u is r/o privlleged only
+    uint32_t rbar, ox10000000;
+    static_assert(M33_MPU_RBAR_XN_BITS == 1);
+    pico_default_asm_volatile(
+        "movs %[rbar], %[xn]\n"
+        "movs %[rbar], %[xn]\n"
+        "movs %[ox10000000], #1\n"
+        "lsls %[ox10000000], %[ox10000000], #28\n"
+        "orrs %[rbar], %[ox10000000]\n"
+        : [rbar] "=l" (rbar), [ox10000000] "=l" (ox10000000)
+        : [xn] "i" (((write ? 0u : 2u) << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS)
+        : "cc"
+    );
+    al_regions3[1].rbar = rbar;
+    // there is a worry if ox10000000 is in fact not 0x10000000 (and is odd) that this may end up clearing
+    // the XN bit. that said, unless both instructions above that set ox10000000 are skipped, then
+    // ox10000000 is likely either 0x00000001 or 0xn0000000. in the former case we'll end up with
+    // overlapping regions, and in the latter case we'll not remove XN.
+    al_regions3[0].rbar = rbar + ox10000000;
 }
 
 static __force_inline void inline_s_enable_mpu(mpu_hw_t *mpu_on_arm) {
@@ -524,20 +554,48 @@ static __force_inline void inline_s_disable_mpu(mpu_hw_t *mpu_on_arm) {
 
 extern uint32_t s_varm_swap_mpu_state(mpu_hw_t *mpu_on_arm, mpu_save_state_t *save_state, uint32_t and);
 
-static __force_inline void s_save_clear_and_disable_mpu(mpu_hw_t *mpu_on_arm, mpu_save_state_t *save_state) {
-    hx_assert_equal2i(s_varm_swap_mpu_state(mpu_on_arm, save_state, 0), BOOTROM_MPU_REGION_COUNT);
+static __force_inline void inline_s_save_clear_and_disable_mpu(mpu_hw_t *mpu_on_arm, mpu_save_state_t *save_state) {
+    s_varm_swap_mpu_state(mpu_on_arm, save_state, 0);
     inline_s_disable_mpu(mpu_on_arm);
 }
 
-static __force_inline void s_restore_and_enable_mpu(mpu_hw_t *mpu_on_arm, mpu_save_state_t *save_state) {
-    hx_assert_equal2i(s_varm_swap_mpu_state(mpu_on_arm, save_state, 0xffffffffu) ^ 0xffffffffu, BOOTROM_MPU_REGION_COUNT);
-    inline_s_enable_mpu(mpu_on_arm);
+static __force_inline void inline_s_restore_and_enable_mpu(mpu_hw_t *mpu_on_arm, mpu_save_state_t *save_state) {
+    uint32_t mixer = s_varm_swap_mpu_state(mpu_on_arm, save_state, 0xffffffffu);
+    // we are enabling the MPU here, but doing so in assembly so we can force the read back of the register to
+    // be in a different register
+    //inline_s_enable_mpu(mpu_on_arm);
+    uint32_t enable = M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS;
+    uint32_t tmp;
+    pico_default_asm_volatile(
+            "str %[enable], [%[mpu], %[ctrl_offset]]\n"
+            "ldr %[tmp], [%[mpu], %[ctrl_offset]]\n"
+            "muls %[mixer], %[tmp]\n"
+            : [tmp] "=&l" (tmp), [mixer] "+l" (mixer)
+            : [enable] "l" (enable),
+              [mpu] "l" (mpu_on_arm),
+              [ctrl_offset] "i" (offsetof(mpu_hw_t, ctrl))
+            : "cc", "memory"
+            );
+#define MIXIN(x, n, p) (((x) + M33_MPU_RLAR_EN_BITS) + (n)) + (p)
+    // note these are the RLAR values from bootrom_mpu_regs in arm8_bootrom_rt0.S
+    // if those change, then these must too
+    uint32_t expected_mixer =
+        MIXIN(SG_BOOTPATH_NEEDED_START_ROUNDUP_32 - 32 -0x20, 0,
+        MIXIN(SRAM_BASE - 0x20, 1,
+        MIXIN(SRAM_END - 0x20, 2,
+        MIXIN((BOOTRAM_BASE + BOOTRAM_ALWAYS_OFFSET - 0x1fu) & ~0x1fu, 3, 0))));
+    expected_mixer *= (M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS);
+#undef MIXIN
+    rcp_iequal( mixer, expected_mixer);
+    rcp_iequal(expected_mixer, mixer);
 }
 
 #define inline_s_set_flash_ro_xn(mpu_on_arm) inline_s_update_mpu(mpu_on_arm, true, false)
 #define inline_s_set_flash_rw_xn(mpu_on_arm) inline_s_update_mpu(mpu_on_arm, true, true)
 #define inline_s_set_ram_ro_xn(mpu_on_arm) inline_s_update_mpu(mpu_on_arm, false, false)
 #define inline_s_set_ram_rw_xn(mpu_on_arm) inline_s_update_mpu(mpu_on_arm, false, true)
+#define inline_s_set_flash_ram_ro_xn(mpu_on_arm) inline_s_update_mpu_both(mpu_on_arm, false)
+#define inline_s_set_flash_ram_rw_xn(mpu_on_arm) inline_s_update_mpu_both(mpu_on_arm, true)
 
 static __force_inline void mark_block_unpopulated(parsed_block_t *block) {
     block->block_data = 0;
@@ -581,10 +639,11 @@ static_assert(sizeof(core0_boot_usbram_workspace) == CORE0_BOOT_USBRAM_WORKSPACE
 
 // needs to be an invalid value 1 is smaller than -1 in terms of arm6 insn space
 #define INVALID_FLASH_UPDATE_BOOT_OFFSET 1
-void s_varm_crit_init_boot_scan_context(scan_workarea_t *scan_workarea, mpu_hw_t *mpu_on_arm,
+// returns a valid hx_bool (the value is not meaningful)
+hx_bool s_varm_crit_init_boot_scan_context(scan_workarea_t *scan_workarea, mpu_hw_t *mpu_on_arm,
                                                bool executable_image_def_only);
 
-static inline bool is_version_greater(parsed_block_t *a, parsed_block_t *b) {
+static inline bool inline_is_version_greater(parsed_block_t *a, parsed_block_t *b) {
     return hx_signed_is_greater(a->rollback_version, b->rollback_version) |
             (hx_is_equal(a->rollback_version, b->rollback_version) && a->major_minor_version > b->major_minor_version);
 }
@@ -617,7 +676,7 @@ void __attribute__((noreturn)) s_arm8_usb_client_ns_call_thunk(uint32_t *secure_
 // we know will ignore writes and read back as zero
 // note this is also used on ARM when using parts of the boot path code
 // outside the boot path.
-static __force_inline mpu_hw_t *get_fake_mpu_sau(void) {
+static __force_inline mpu_hw_t *inline_s_get_fake_mpu_sau(void) {
     static_assert(offsetof(mpu_hw_t, ctrl) < FAKE_MPU_SAU_SIZE, "");
     static_assert(offsetof(mpu_hw_t, rbar) < FAKE_MPU_SAU_SIZE, "");
     static_assert(offsetof(mpu_hw_t, rlar) < FAKE_MPU_SAU_SIZE, "");

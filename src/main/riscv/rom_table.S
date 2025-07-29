@@ -303,7 +303,7 @@ RT_FUNC_ENTRY_SHARED_SEC            ( ROM_FUNC_GET_UF2_TARGET_PARTITION,      s_
 RT_FUNC_ENTRY_RISCV                 ( ROM_FUNC_SET_BOOTROM_STACK,             s_native_set_varmulet_user_stack                                               )
 
 RT_DATA_ENTRY_PTR                   ( ROM_DATA_SOFTWARE_GIT_REVISION,         RT_ARM_ADDR(software_git_revision)                                             )
-RT_DATA_ENTRY_PTR                   ( ROM_DATA_PARTITION_TABLE_PTR,           RT_ARM_ADDR(partition_table_ptr)                                               )
+RT_DATA_ENTRY_PTR                   ( ROM_DATA_PARTITION_TABLE_PTR,           RT_ARM_ADDR(partition_table_pointer)                                           )
 RT_DATA_ENTRY_PTR                   ( ROM_DATA_SAVED_XIP_SETUP_FUNC_PTR,      RT_ARM_ADDR(xip_setup_func_ptr)                                                )
 RT_DATA_ENTRY_PTR                   ( ROM_DATA_FLASH_DEVINFO16_PTR,           RT_ARM_ADDR(flash_devinfo16_ptr)                                               )
 _rom_table_end:

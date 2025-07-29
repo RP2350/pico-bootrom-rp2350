@@ -70,6 +70,7 @@ set(P16_TARGETS
         #sau_rlar/d1
         s_varm_api_get_sys_info/1
         s_varm_api_get_partition_table_info/1
+        nsboot_vm_constants/d1
 )
 
 set(P16_ASSERTS "")
@@ -87,7 +88,6 @@ endforeach()
 # provide these two from ARM as software_git_revision is needed by nsboot, and
 # having them defined is easier for the rom_table
 target_link_options(bootrom_raw PRIVATE "LINKER:--undefined=software_git_revision")
-target_link_options(bootrom_raw PRIVATE "LINKER:--undefined=partition_table_ptr")
 
 set(P16_ASSERTS_LINKER_SCRIPT ${CMAKE_BINARY_DIR}/p16_asserts.ld)
 set(P16_INCLUDE_FILE ${CMAKE_BINARY_DIR}/p16.h)

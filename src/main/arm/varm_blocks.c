@@ -80,14 +80,15 @@ int s_varm_crit_next_block(block_scan_t *bs) {
             if (to_read_word_count > 0) {
                 next_block_printf("READ %08x(%08x) + %08x -> %p - %p\n",
                                   (uint) bs->ctx->current_search_window.base + bs->window_rel_next_read_word_offset*4,
-                                  resolve_ram_or_absolute_flash_addr(bs->ctx->current_search_window.base) + bs->window_rel_next_read_word_offset,
+                                  inline_s_resolve_ram_or_absolute_flash_addr(bs->ctx->current_search_window.base) + bs->window_rel_next_read_word_offset,
                                   (uint) to_read_word_count * 4,
                                   buffer + bs->buf_word_count,
                                   buffer + bs->buf_word_count + to_read_word_count);
                 // note: this was an inlines flash_read_data; however we now support reading from RAM too, and flash-read_data is just assert + memcpy
                 // hx_assert_equal2i(addr & -(1u << 24), 0);
-                s_varm_crit_mem_copy_by_words(buffer + bs->buf_word_count,
-                                           resolve_ram_or_absolute_flash_addr(bs->ctx->current_search_window.base) + bs->window_rel_next_read_word_offset, (uint32_t)to_read_word_count*4);
+                call_s_varm_crit_mem_copy_by_words(buffer + bs->buf_word_count,
+                                                   inline_s_resolve_ram_or_absolute_flash_addr(
+                                                           bs->ctx->current_search_window.base) + bs->window_rel_next_read_word_offset, (uint32_t)to_read_word_count * 4);
                 bs->window_rel_next_read_word_offset += (uint32_t)to_read_word_count;
                 bs->buf_word_count += (block_word_index_t)to_read_word_count;
             }
@@ -97,15 +98,16 @@ int s_varm_crit_next_block(block_scan_t *bs) {
             unsupported_block_error(128, "attempt to read outside of window at %08x(%08x)\n",
                                     (uint) bs->ctx->current_search_window.base +
                                     bs->window_rel_next_read_word_offset * 4,
-                                    resolve_ram_or_absolute_flash_addr(bs->ctx->current_search_window.base) +
+                                    inline_s_resolve_ram_or_absolute_flash_addr(bs->ctx->current_search_window.base) +
                                     bs->window_rel_next_read_word_offset);
         }
+        uint32_t block_marker_start = __get_opaque_value(PICOBIN_BLOCK_MARKER_START);
         if (!first_block_found(bs)) {
             next_block_printf("searching for first block\n");
             // we must look for the first block
             while (bs->buf_word_pos < bs->buf_word_count) {
                 uint32_t value = buffer[bs->buf_word_pos];
-                if (value == PICOBIN_BLOCK_MARKER_START) {
+                if (value == block_marker_start) {
                     next_block_printf("possible first block start at buffer offset %08x = %08x\n", (uint) bs->buf_word_pos*4, debug_real_addr(bs, bs->buf_word_pos));
                     break;
                 }
@@ -122,7 +124,7 @@ int s_varm_crit_next_block(block_scan_t *bs) {
             }
         } else {
             uint32_t value = buffer[bs->buf_word_pos];
-            if (value != PICOBIN_BLOCK_MARKER_START) {
+            if (value != block_marker_start) {
                 unsupported_block_error(1, "no block marker at next expected pos %p\n", debug_real_addr(bs, bs->buf_word_pos));
                 // if we've found the first block, then we expect to immediately find a block where we're looking
             }
@@ -133,7 +135,7 @@ int s_varm_crit_next_block(block_scan_t *bs) {
             next_block_printf("copying %d words from %08x to start of buffer\n", bs->buf_word_count - bs->buf_word_pos, buffer + bs->buf_word_pos);
             // buf_pos is not at start of buffer, so we will move everything down
             bootrom_assert(BLOCK_SCAN, bs->buf_word_pos != bs->buf_word_count);
-            s_varm_crit_mem_copy_by_words(buffer, buffer + bs->buf_word_pos, (bs->buf_word_count - bs->buf_word_pos)*4u);
+            call_s_varm_crit_mem_copy_by_words(buffer, buffer + bs->buf_word_pos, (bs->buf_word_count - bs->buf_word_pos)*4u);
             bs->buf_word_count -= bs->buf_word_pos;
             bs->window_rel_buf_start_word_offset += bs->buf_word_pos;
             bs->buf_word_pos = 0;
@@ -149,7 +151,7 @@ int s_varm_crit_next_block(block_scan_t *bs) {
             const aligned4_uint8_t *ptr = (const aligned4_uint8_t *)(buffer + item_pos);
             next_block_printf("ITEM AT %08x (off %d) %08x\n", (int)item_pos*4, (int)item_pos, ((const uint32_t*)ptr)[0]);
             uint8_t type = ptr[0];
-            uint32_t item_size = inline_decode_item_size(*(const uint32_t *)ptr);
+            uint32_t item_size = call_decode_item_size(*(const uint32_t *)ptr);
             if (!item_size) {
                 unsupported_block_error(2, "invalid zero sized item");
             }
@@ -204,6 +206,8 @@ int s_varm_crit_next_block(block_scan_t *bs) {
     } while (true);
 }
 
+// Note this actually returns one plus the index of the most-significant set
+// bit (e.g. returns 32 if MSB is set)
 static __force_inline uint32_t inline_arm8_highest_bit(uint32_t v) {
     rcp_asm("clz %0, %0\n"
             "rsb %0, #32\n"
@@ -211,11 +215,15 @@ static __force_inline uint32_t inline_arm8_highest_bit(uint32_t v) {
     return v;
 }
 
+// same as in sb_fe_armv7.S
+#define STEPTAG_S_SHA256_UPDATE_32 (STEPTAG_S_VARM_SHA256_PUT_WORD + 1)
+
 static inline hx_xbool s_varm_crit_is_signing_key_match(const sb_sw_public_t *public_key) {
     sb_sha256_state_t sha;
     // Check signature key against expected key fingerprint in OTP
     sb_sha256_init(&sha);
     sb_sha256_update_32(&sha, public_key->words, sizeof(public_key->words));
+    hx_check_step_nodelay(STEPTAG_S_SHA256_UPDATE_32 + 1);
     sb_single_t digest_buffer;
     sb_sha256_finish(&sha, digest_buffer.bytes);
 //    printf("checkmatch sigkey: ");
@@ -240,6 +248,7 @@ static inline hx_xbool s_varm_crit_is_signing_key_match(const sb_sw_public_t *pu
         if (valid_a & 1) {
             printf("KEY %d is marked valid (and not invalid)\n", k);
             for (; i < SB_SHA256_SIZE; i += 2) {
+                // RP2350-E17; guarded reads here are fine as sibling rows are enabled by the same bit
                 uint32_t otp_key_hword = inline_s_otp_read_ecc_guarded(OTP_DATA_BOOTKEY0_0_ROW + k * 16 + i / 2);
                 //        printf("%04x", __builtin_bswap16(otp_key_hword));
 #pragma GCC diagnostic push
@@ -341,7 +350,7 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
                                 uint32_t parsed_block_size_words, uint32_t max_block_size_words) {
     canary_entry(S_VARM_CRIT_PARSE_BLOCK);
 //    printf("parseb SP=%08x\n", get_sp());
-    s_varm_step_safe_crit_mem_erase_by_words((uintptr_t) parsed_block, parsed_block_size_words * 4, true);
+    call_s_varm_step_safe_crit_mem_erase_by_words((uintptr_t) parsed_block, parsed_block_size_words * 4, true);
 #if !BOOTROM_HARDENING
     parsed_block->verified = hx_bool_null(); // 0 is the NULL value for hardening, but it is something else for no HARDENING (since 0 == false)
 #endif
@@ -366,10 +375,27 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
     // block is at start of our buffer
     uint32_t *block_data = bs->ctx->scan_workarea->block_buffer_or_signature_workspace.block_buffer;
     hx_xbool sig_otp_key_match; // note we keep a local copy so it isn't set in the block until we check that the whole block is signed
-    sig_otp_key_match = parsed_block->sig_otp_key_match_and_block_hashed = hx_key_match_false();
+    uint32_t v;
+    // assign hx_key_match_false() to sig_otp_key_match (twice) and to
+    // parsed_block->sig_otp_key_match_and_block_hashed
+    pico_default_asm_volatile(
+        ".cpu cortex-m33\n"
+        // load %v with hx_key_match_false()
+        "mrc p7, #7, %[v], c0, c8, #0\n"
+        ".cpu cortex-m23\n"
+        "str %[v], %[sig_otp_key_match]\n"
+        "str %[v], [%[parsed_block], %[SIG_OTP_KEY_MATCH_AND_BLOCK_HASHED_OFFSET]]\n"
+        "str %[v], %[sig_otp_key_match]\n"
+        : [v] "=l" (v)
+        : [sig_otp_key_match] "m" (sig_otp_key_match),
+          [parsed_block] "l" (parsed_block),
+          [SIG_OTP_KEY_MATCH_AND_BLOCK_HASHED_OFFSET] "i" (offsetof(parsed_block_t, sig_otp_key_match_and_block_hashed))
+        : "memory"
+    );
 #if FEATURE_EXEC2
     parsed_block->salt_included = hx_false();
 #endif
+    // we're pretty sure we erased parse_block above, so not so worried about skipping these
     parsed_block->signature_verified = hx_sig_verified_false();
     parsed_block->enclosing_window = bs->ctx->current_search_window;
     parsed_block->window_rel_block_offset = bs->window_rel_buf_start_word_offset * 4;
@@ -381,13 +407,22 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
         if ((0x100 | PICOBIN_BLOCK_ITEM_1BS_IMAGE_TYPE) != (uint16_t) block_data[1]) {
             goto parse_block_done_error;
         }
-        uint32_t image_type_flags = (uint16_t) (block_data[1] >> 16u);
+        uint32_t image_type_flags = (block_data[1] >> 16u);
         ((parsed_image_def_t *)parsed_block)->image_type_flags = (uint16_t)image_type_flags;
         if ((image_type_flags & PICOBIN_IMAGE_TYPE_IMAGE_TYPE_BITS) == PICOBIN_IMAGE_TYPE_IMAGE_TYPE_AS_BITS(EXE)) {
             // clear tbyb flag so we don't break sig check
             block_data[1] &= ~(PICOBIN_IMAGE_TYPE_EXE_TBYB_BITS << 16);
             parsed_block->tbyb_flagged = image_type_flags & PICOBIN_IMAGE_TYPE_EXE_TBYB_BITS;
-            unsupported_block_if((image_type_flags & PICOBIN_IMAGE_TYPE_EXE_CHIP_BITS) != PICOBIN_IMAGE_TYPE_EXE_CHIP_AS_BITS(RP2350),
+            uint32_t fourteen = 7 * 2;
+            if (image_type_flags & PICOBIN_IMAGE_TYPE_EXE_EXTRA_SECURITY_BITS) {
+                // this has no thumb bit set, so is an invalid entry point
+                ((parsed_image_def_t *)parsed_block)->rolled_entry_point_addr = fourteen;
+                // this is treated as zero by VTOR register, so we get the ROM VTABLE
+                ((parsed_image_def_t *)parsed_block)->rolled_vector_table_addr = fourteen;
+            }
+            static_assert(PICOBIN_IMAGE_TYPE_EXE_CHIP_BITS == 0x7000, "");
+            static_assert((PICOBIN_IMAGE_TYPE_EXE_CHIP_BITS >> 11) == 14, "");
+            unsupported_block_if(((image_type_flags >> 11) & fourteen) != PICOBIN_IMAGE_TYPE_EXE_CHIP_RP2350 * 2,
                                  "executable image_def is not for RP2350");
         }
         word_index = 2;
@@ -401,7 +436,7 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
             singleton_and_partition_count += 128; // singleton_and_partition_count & 0x7f
             ((parsed_partition_table_t *)parsed_block)->singleton = true;
         }
-        uint16_t size = inline_decode_item_size(block_data[1]);
+        uint16_t size = call_decode_item_size(block_data[1]);
         unsupported_block_if(size < 2 || singleton_and_partition_count > PARTITION_TABLE_MAX_PARTITIONS, "expected PARTITION_TABLE of size at least 2, and max %d partitions", PARTITION_TABLE_MAX_PARTITIONS);
         ((parsed_partition_table_t *)parsed_block)->partition_count = (uint8_t)singleton_and_partition_count;
         // skip all contents for now
@@ -417,7 +452,7 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
     for(; word_index < block_size_words; ) {
         uint32_t header = block_data[word_index++];
         hx_assert_equal2i((uintptr_t)&block_data[word_index], (uintptr_t)block_data_word_index_plus_1);
-        uint32_t size = inline_decode_item_size(header);
+        uint32_t size = call_decode_item_size(header);
         if (!size || (header & 0x7f) == 0x7f) {
             break;
         }
@@ -442,11 +477,15 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
 //                            image_def->public_key_word_size = 16;
                 parsed_block->signature_word_index = to_block_word_index_t(word_index + 16);
 //                            image_def->signature_word_size = 16;
+                // we modify the first word of the signature with a per boot value
+                // as a protection against somehow using a canned signature later;
+                // (note we undo this modification just before checking the signature)
+                block_data[word_index+16] += rcp_canary_get_nodelay(CTAG_SIG_DISRUPTER);
 #if MINI_PRINTF
                 parsed_block->sig_type = sig_type;
 #endif
                 sig_otp_key_match = s_varm_crit_is_signing_key_match(
-                        (sb_sw_public_t *) (block_data + parsed_block->public_key_word_index));
+                        (sb_sw_public_t *) (block_data + word_index));
             }
             goto skip_sig_needed;
         } else if (item_type == PICOBIN_BLOCK_ITEM_1BS_VERSION) {
@@ -454,7 +493,8 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
             unsupported_block_if((int)size != 2 + ((otp_row_count != 0) + otp_row_count + 1) / 2,
                                  "VERSION_ITEM size %d doesn't match expected: 2 + (otp_row_count?(%d) + otp_row_count(%d) + 1) / 2\n", size, otp_row_count!=0, otp_row_count);
             parsed_block->major_minor_version = block_data[word_index];
-            // Rollback is only of interest in secure mode (and currently only applies to IMAGE_DEF
+            uint32_t p;
+            // Rollback is only of interest in secure mode (and currently only applies to IMAGE_DEF)
             if (otp_row_count) {
                 unsupported_block_if(parsed_block_size_words != PARSED_IMAGE_DEF_WORD_SIZE, "Rollback version is only supported on IMAGE_DEF");
                 const uint16_t *extra = (const uint16_t*)(block_data + word_index + 1);
@@ -464,7 +504,7 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
                 unsupported_block_if(hx_signed_is_greater_equali(rollback_version, otp_row_count * 24),
                                      "rollback version %d is too big for OTP row definition (%d rows = max %d)\n", hx_value(rollback_version), otp_row_count, otp_row_count * 24 - 1);
                 if (hx_is_xtrue(gcc_avoid_single_movw_plus_ldr(bootram->always.secure))) {
-                    // this is a bit dependent on the geerated code, however GCC is calculating extra here
+                    // this is a bit dependent on the generated code, however GCC is calculating extra here
                     // and spilling it to the stack, so we check that it is written correctly
                     const uint16_t *reg_extra = __get_opaque_ptr(extra);
                     rcp_iequal((uintptr_t)reg_extra, (uintptr_t)(const volatile uint16_t *)extra);
@@ -580,6 +620,8 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
                         !((parsed_image_def_t *) parsed_block)->rollback_version_otp_info.row) {
                         bootrom_assert(MISC, (int32_t)rv > 0); // unsigned compare above should make this so!
                         uint bit = rv - 1u; // logical bit to set
+                        // note the division here is not supported on RISC-V (under varmulet)
+                        // but that is fine as we don't support secure on RISC-V
                         printf("  OTP update row is now 0x%04x bit %d to make new version %d \n",
                                extra[bit / 24], bit % 24, bit);
                         ((parsed_image_def_t *) parsed_block)->rollback_version_otp_info.row = extra[bit / 24];
@@ -589,16 +631,41 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
                     hx_assert_true(ok_version);
                     // if rv was 24, then we would need two rows
                     hx_assert_equal2i((__get_opaque_value(header)>>24u) * 24u <= __get_opaque_value(hx_value(rollback_version)), 0);
-                    hx_assert_true(ok_version);
-                    parsed_block->rollback_version = rollback_version;
-                    hx_assert_equal2i(hx_value(parsed_block->rollback_version), extra[-1]);
+                    // p = hx_true() ^ rollback_version.p ^ ok_version = rollback_version.p or garbage
+                    // (done in assembly because GCC may otherwise reorder the arguments
+                    // breaking our deliberate starting with hx_true()
+                    p = hx_bit_pattern_true();
+                    pico_default_asm_volatile(
+                            "eors %[p], %[rollback_version]\n"
+                            "eors %[p], %[ok_version]\n"
+                            : [p] "+l" (p)
+                            : [ok_version] "l" (ok_version.v),
+                              [rollback_version] "l" (rollback_version.p)
+                            : "cc"
+                            );
                     hx_assert_equal2i((uint32_t)ri24, 0);
                 } else {
-                    hx_assert_xfalse(gcc_avoid_single_movw_plus_ldr(bootram->always.secure), hx_bit_pattern_xor_secure());
-                    hx_assert_xfalse(gcc_avoid_single_movw_plus_ldr(bootram->always.secure), hx_bit_pattern_xor_secure());
+                    uint32_t xor_secure = hx_bit_pattern_xor_secure();
+                    hx_assert_xfalse(gcc_avoid_single_movw_plus_ldr(bootram->always.secure), xor_secure);
+                    // p = hx_false() ^ rollback_version.p ^ xor_secure ^ secure = rollback_version.p or garbage
+                    // (done in assembly because GCC may otherwise reorder the arguments
+                    // breaking our deliberate starting with hx_true()
+                    p = hx_bit_pattern_false();
+                    pico_default_asm_volatile(
+                            "eors %[p], %[rollback_version]\n"
+                            "eors %[p], %[xor_secure]\n"
+                            "eors %[p], %[secure]\n"
+                    : [p] "+l" (p)
+                    : [secure] "l" (gcc_avoid_single_movw_plus_ldr(bootram->always.secure).v),
+                      [rollback_version] "l" (rollback_version.p),
+                      [xor_secure] "l" (xor_secure)
+                    : "cc"
+                    );
                 }
+                parsed_block->rollback_version.p = p;
+                parsed_block->rollback_version.v = rollback_version.v;
+                hx_assert_equal2i(hx_value(parsed_block->rollback_version), extra[-1]);
                 hx_check_uint32(parsed_block->rollback_version);
-                parsed_block->rollback_version = rollback_version;
             }
 #if FEATURE_EXEC2
         } else if (item_type == PICOBIN_BLOCK_ITEM_SALT) {
@@ -611,7 +678,11 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
             parsed_image_def_t *parsed_image_def = (parsed_image_def_t *)parsed_block;
             if (item_type == PICOBIN_BLOCK_ITEM_1BS_VECTOR_TABLE) {
                 unsupported_block_if(size != 2, "VECTOR_TABLE item has wrong size");
-                parsed_image_def->rolled_vector_table_addr = block_data[word_index];
+                // likely force use of the same register as item_type (we say we depend on it in asm below)
+                // so that we are unlikely to put a useful value in the VTOR on skipping the load (will be 2 it seems)
+                item_type = block_data[word_index];
+                parsed_image_def->rolled_vector_table_addr = item_type;
+                pico_default_asm_volatile("" : : "l" (item_type));
             } else if (item_type == PICOBIN_BLOCK_ITEM_1BS_ENTRY_POINT) {
                 unsupported_block_if(size != 3 && size != 4, "ENTRY_POINT item has wrong size");
 #if !ASM_SIZE_HACKS
@@ -621,6 +692,8 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
 #else
                 uint32_t *data = block_data + word_index;
                 pico_default_asm_volatile(
+                    // block_data + word_index is already in a register
+                    "movs r2, %[data]\n" // data is not a valid entry point on Arm (no thumb bit), so let's preload it
                     "ldmia %[data]!, {r2, r3, r4}\n"
                     "str r2, [%[image], %[entry_point]]\n"
                     "str r3, [%[image], %[initial_sp]]\n"
@@ -634,9 +707,11 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
                       [entry_point] "i" (offsetof(parsed_image_def_t, rolled_entry_point_addr)),
                       [initial_sp] "i" (offsetof(parsed_image_def_t, initial_sp)),
                       [initial_sp_limit] "i" (offsetof(parsed_image_def_t, initial_sp_limit))
-                    : "r2", "r3", "r4", "cc"
+                    : "r2", "r3", "r4", "cc", "memory"
                 );
-                __dataflow_barrier(data);
+                __dataflow_barrier(data); // mark data as updated (it is actually updated above)
+                // double check that we actually read the values from the right place
+                hx_assert_equal2i((uintptr_t)data, (uintptr_t)(block_data_word_index_plus_1 + 3));
 #endif
             } else if (item_type == PICOBIN_BLOCK_ITEM_1BS_ROLLING_WINDOW_DELTA) {
                 unsupported_block_if(size != 2, "ROLLING_WINDOW_DELTA item has wrong size");
@@ -662,7 +737,13 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
         block_data_word_index_plus_1++;
     }
     unsupported_block_if(word_index != block_size_words, "block size mismatch");
-    unsupported_block_if(parsed_block_size_words == PARSED_IMAGE_DEF_WORD_SIZE && !hx_value(parsed_block->rollback_version) && hx_is_xtrue(bs->ctx->rollback_version_required), "no rollback version, but OTP says rollback version required");
+    if (parsed_block_size_words == PARSED_IMAGE_DEF_WORD_SIZE) {
+        unsupported_block_if(!hx_value(parsed_block->rollback_version) && hx_is_xtrue(bs->ctx->rollback_version_required), "no rollback version, but OTP says rollback version required");
+        parsed_image_def_t *parsed_image_def = (parsed_image_def_t *)parsed_block;
+        // entry_point/vector_table of 0 means not set
+        // entry_point/vector_table of 14 means needed, but not set
+        unsupported_block_if(parsed_image_def->rolled_entry_point_addr == 14 || parsed_image_def->rolled_vector_table_addr == 14, "IMAGE_DEF with extra security requires ENTRY_POINT and VECTOR_TABLE (not in bootrom)");
+    }
     if (hx_is_xtrue(sig_otp_key_match)) {
         hx_set_step_nodelay(STEPTAG_S_VARM_CRIT_PARSE_BLOCK1);
         uint read0 = sig_needed_word_index;
@@ -677,7 +758,7 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
         pico_default_asm_volatile_goto(
             "subs %[tmp], %[read1]\n"
             "blo 1f\n"                   // words_included < sig_needed_word_index
-            // store in read1 instead of words0, because tmp ad words0 should already have been equal
+            // store in read1 instead of words0, because tmp and words0 should already have been equal
             // and if the subs are skipped, they would remain so
             "subs %[read1], %[words0], %[read0]\n"
             "bhs 2f\n"                   // words_included >= sig_needed_word_index
@@ -694,18 +775,20 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
             : [words0] "+l" (words0), [tmp] "+l" (tmp)
             : [read0] "l" (read0), [read1] "l" (read1),
               [pbs_words] "r" (parsed_block_size_words)
-            :
+            : "cc"
             : bad_item
             );
+        // note tmp should be parsed_block_size_words.. if it is,
+        // we'll correctly subtract it to 0, and sig_otp_key_match_and_block_hashed will be set correctly
         if (tmp == PARSED_IMAGE_DEF_WORD_SIZE) {
             hx_bool has_rollback_version = hx_uint32_to_bool_checked(parsed_block->rollback_version);
             hx_bool not_rollback_version_required = hx_notx(bs->ctx->rollback_version_required, boot_flag_selector(OTP_DATA_BOOT_FLAGS0_ROLLBACK_REQUIRED_LSB));
             hx_bool really_ok = hx_or(has_rollback_version, not_rollback_version_required);
             hx_assert_true(really_ok);
             // really_ok.v should be 0xa500a500
-            really_ok.v <<= 24;
-            // really_ok.v should be 0
-            really_ok.v = __get_opaque_value(really_ok.v - PARSED_IMAGE_DEF_WORD_SIZE);
+            really_ok.v >>= 24;
+            // really_ok.v should be 0xa5
+            really_ok.v = __get_opaque_value(really_ok.v - 0xa5 - PARSED_IMAGE_DEF_WORD_SIZE);
             // really_ok.v should be -PARSED_IMAGE_DEF_WORD_SIZE
             tmp = __get_opaque_value(tmp) + really_ok.v;
             // tmp should be zero
@@ -713,8 +796,18 @@ bool s_varm_crit_parse_block(block_scan_t *bs, uint32_t block_size_words, parsed
             tmp -= PARSED_PARTITION_TABLE_WORD_SIZE;
             // tmp should be zero
         }
-        tmp += sig_otp_key_match.v;
-        // tmp shoud be sig_otp_key_match.v
+
+        // done in assembly to thwart GCC commuting arguments
+        // tmp += sig_otp_key_match.v;
+        pico_default_asm(
+                "add %[tmp], %[v]\n"
+                : [tmp] "+l" (tmp)
+                : [v] "l" (sig_otp_key_match.v)
+                );
+        // tmp should be sig_otp_key_match.v
+
+        // note in the future it might be nice to add a hx_check_xbool here, however it is checked twice later,
+        // once in calculation of `verified` flag, and once during launch image
         parsed_block->sig_otp_key_match_and_block_hashed.v = tmp;
         hx_check_step_nodelay(STEPTAG_S_VARM_CRIT_PARSE_BLOCK1);
     }
@@ -751,7 +844,7 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
                                            parsed_block_t *parsed_block, parsed_block_t *cosign_contents_block) {
     hx_bool cosign_covered = hx_false();
     // 1. the first time through a block should have a verified value of 0 which is invalid.
-    // 2. if the block isn't populated then noone should check the verified value, so leaving it invalid is fine
+    // 2. if the block isn't populated then no one should check the verified value, so leaving it invalid is fine
     // 3. we only want to verify once
     hx_check_bools(sig_required, hash_required);
     if (is_block_populated(parsed_block) && hx_is_null(parsed_block->verified)) {
@@ -760,6 +853,7 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
         // 4. all code paths here should set verifed to a valid value, so we don't need to pre-init
         const uint32_t *block_data = parsed_block->block_data;
         sb_sha256_state_t sha;
+        // if we are glitched to not hash, then we aren't going to have the right hash result, so this doesn't need hardening
         bool do_hash = parsed_block->hash_value_word_index || hx_is_true(sig_required) || hx_is_true(hash_required);
         if (do_hash) {
             if (__get_opaque_value(parsed_block->hash_type) != PICOBIN_HASH_SHA256) {
@@ -770,19 +864,39 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
         }
         // we will calculate at least an empty SHA256 if not hashing
         sb_sha256_init(&sha);
+        // verify call happened
+        rcp_count_check_nodelay(STEPTAG_SB_SHA256_INIT + 1);
+
         // load_map may load into XIP cache, so now is the time to flush the cache (as late as
         // possible without reverting any cache pinning performed by load_map) -- also it's
         // important this is done for every IMAGE_DEF, to avoid garbage from previous attempt.
         // Need write access for maintenance operations:
         inline_s_set_flash_rw_xn(ctx->mpu_on_arm); // note during NSBoot verification this is fake_mpu even on ARM
-        hx_check_bool(ctx->booting);
-        if (hx_is_true(ctx->booting)) {
+
+        // we want to make sure that the cache is indeed flushed, otherwise we may
+        // have secure data in it from prior to the reboot (or a previous verify operation)
+        uint32_t witness;
+        hx_bool booting = ctx->booting;
+        hx_check_bool(booting);
+        if (hx_is_true(booting)) {
             printf("Flushing XIP cache\n");
-            s_varm_api_crit_flash_flush_cache();
+            // witness should be 0x1c000000 + 0 (end of XIP_MAINTENANCE_WINDOW + XIP_CACHE_MAINTENANCE_OP_INVALIDATE_BY_SET_WAY)
+            witness = call_s_varm_api_crit_flash_flush_cache();
+            static_assert(0x1c000000 ==
+                (XIP_MAINTENANCE_BASE + XIP_CACHE_MAINTENANCE_OP_INVALIDATE_BY_SET_WAY +
+                 XIP_END - XIP_BASE), "");
         } else {
-            hx_assert_false(ctx->booting);
+            // double check booting flag
+            hx_assert_false(booting);
+            // witness = 0xc300c3(if booting == false) - (0xc3 - 0x1c) = 0xc3001c(if booting == false);
+            witness = (booting.v - (0xc3 - 0x1c));
+            // witness = 0x1c000000(if booting == false)
+            witness <<= 24;
         }
+        hx_assert_equal2i(witness, 0x1c000000);
         // note only IMAGEs have load maps
+
+        // if we glitch over this path, we won't have the right hash (unless the hash the same as empty data)
         if (parsed_block->load_map_word_index) {
             // need RAM access for load map
             inline_s_set_ram_rw_xn(ctx->mpu_on_arm);
@@ -796,7 +910,13 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
                 // this is the runtime address, but un-rolled and offset by enclosing_window in the flash case;
                 // i.e. for a runtime_address in the load map of 0x10000010, but in a partition starting at 0x10040000,
                 // the value will be 0x10040010
-                uint32_t to_storage_addr = map_vma;
+
+                // note that r5 is not used by any functions we call either
+                register uint32_t to_storage_addr asm ("r5") = map_vma;
+                // we track the changes made to to_storage_addr throughout this function as a form of redundancy
+                // to verify that to_storage_addr is not corrupted
+                uint32_t runtime_address_to_storage_addr = 0; // to_storage_addr == map_vma == entry->runtime_address
+
                 // we are looking for flash targets, however exotic binaries may have a runtime physical address that starts outside
                 // the flash range, and then rolls into it, so we check for (not) RAM/XIP RAM here.
                 uint32_t lma_to_storage = parsed_block->enclosing_window.base + parsed_block->slot_roll - XIP_BASE + ((const parsed_image_def_t *)parsed_block)->rolling_window_delta;
@@ -806,9 +926,10 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
 
                 if (map_vma < XIP_BASE + 16*1024*1024) {
                     // note we assume this is an image_def (this code path is not taken for partition tables)
+                    runtime_address_to_storage_addr = lma_to_storage;
                     to_storage_addr += lma_to_storage;
                 } else {
-                    // xip/sram/cs1 targets are unrolled
+                    // xip/sram/cs1 targets are not rolled
                 }
 
                 uint32_t size = map_size_value;
@@ -817,8 +938,10 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
                 }
                 uint32_t to_storage_addr_end = to_storage_addr + size;
 
+                // note as of A4, we no longer support non-multiple of 4 sizes in load maps (picotool never did,
+                // A2/A3 had a bug, and the functionality was weird anyway - we rounded up to copy)
                 bool valid_to_address_span =
-                        !(to_storage_addr & 3u) &&
+                        !(to_storage_addr & 3u) && !(size & 3) &&
                         inline_s_is_valid_runtime_or_storage_address(to_storage_addr) &&
                         inline_s_is_valid_runtime_or_storage_address(to_storage_addr_end - !!size) &&
                         // check to_storage_addr_end >= store_addr, but also that they are not
@@ -842,7 +965,8 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
                 if (hx_is_true(ctx->booting)) {
                     if (inline_s_is_xip_ram(to_storage_addr)) {
                         printf("  XIP_RAM == true, so pinning XIP RAM\n");
-                        s_varm_crit_pin_xip_ram();
+                        // if this pinning is skipped, then we will crash trying to write to the XIP cache
+                        call_s_varm_crit_pin_xip_ram();
                     }
                 }
 
@@ -850,16 +974,28 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
                 uint32_t from_storage_addr;
                 if (!map_storage_address_value) {
                     // 0 in the storage_address means zero it
-                    size = (size + 3u) & ~3u;
+                    uint out_size;
                     if (hx_is_true(ctx->booting)) {
                         printf("  LOADER zero %08x + %08x ", (uint) to_storage_addr, (uint) size);
-                        to_storage_addr = (uintptr_t)resolve_ram_or_absolute_flash_addr(to_storage_addr);
+                        to_storage_addr = (uintptr_t) inline_s_resolve_ram_or_absolute_flash_addr(to_storage_addr);
                         printf("  i.e. %08x + %08x\n", (uint) to_storage_addr, (uint) size);
-                        size = s_varm_step_safe_crit_mem_erase_by_words(to_storage_addr, size, true);
+                        out_size = call_s_varm_step_safe_crit_mem_erase_by_words(to_storage_addr, size, true);
                     } else {
                         hx_assert_false(ctx->booting);
+                        // out_size = ctx->booting == hx_false() ? size : <garbage>
+                        // (via out_size = ctx->booting.v ^ size ^ hx_false())
+                        out_size = ctx->booting.v;
+                        // use assembly to guarantee ordering
+                        // out_size ^= size;
+                        pico_default_asm(
+                                "eors %[out_size], %[size]\n"
+                                : [out_size] "+l" (out_size)
+                                : [size] "l" (size)
+                                : "cc"
+                                );
+                        out_size ^= hx_bit_pattern_false();
                     }
-                    s_varm_sha256_put_word_inc(size, &sha);
+                    s_varm_sha256_put_word_inc(out_size, &sha);
                     continue;
                 } else {
                     from_storage_addr = map_storage_address_value;
@@ -886,15 +1022,43 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
                 }
                 if (hx_is_false(ctx->booting)) {
                     // we don't load image when not booting, and just verify it in place
-                    to_storage_addr = from_storage_addr;
                     hx_assert_false(ctx->booting);
-                } else if (to_storage_addr != from_storage_addr) {
-                    *ctx->diagnostic = BOOT_DIAGNOSTIC_LOAD_MAP_ENTRIES_LOADED;
-                    printf("  LOADER copy %08x + %08x -> %08x\n", (uint) from_storage_addr, (uint) size,
-                           (uint) to_storage_addr);
-                    hx_assert_equal2i(to_storage_addr >> 30, 0);
-                    s_varm_crit_mem_copy_by_words((uint32_t *) to_storage_addr,
-                                                  resolve_ram_or_absolute_flash_addr(from_storage_addr), (size + 3u)&~3u);
+                    runtime_address_to_storage_addr += from_storage_addr - to_storage_addr;
+                    // to_storage_addr = ctx->booting == hx_false() ? from_storage_addr : <garbage>
+                    // (via to_storage_addr = ctx->booting.v ^ from_storage_addr ^ hx_false()
+                    to_storage_addr = ctx->booting.v;
+                    // done in assembly to guarantee ordering
+                    // to_storage_addr ^= from_storage_addr;
+                    pico_default_asm(
+                            "eors %[to_storage_addr], %[from_storage_addr]\n"
+                            : [to_storage_addr] "+l" (to_storage_addr)
+                            : [from_storage_addr] "l" (from_storage_addr)
+                            : "cc"
+                            );
+                    to_storage_addr ^= hx_bit_pattern_false();
+                } else {
+                    uint32_t from_storage_addr_check = __get_opaque_value(from_storage_addr);
+                    if (to_storage_addr != from_storage_addr) {
+                        *ctx->diagnostic = BOOT_DIAGNOSTIC_LOAD_MAP_ENTRIES_LOADED;
+                        printf("  LOADER copy %08x + %08x -> %08x\n", (uint) from_storage_addr, (uint) size,
+                               (uint) to_storage_addr);
+                        hx_assert_equal2i(to_storage_addr >> 30, 0);
+                        // note we don't 100% care if to_storage_addr is wrong here due to a glitch attack
+                        // as if we don't perform the copy correctly, then we will not have the right data to hash
+                        // later on where we DO check to_storage_addr
+                        //
+                        // it is possible that this to_storage addr could be wrong such that it overwrites
+                        // previously hashed data in memory, but again this doesn't matter, because we are still going to
+                        // hash the incorrect data below as we didn't copy the data here to the right address
+                        //
+                        // note as I think about this, I also worry about the to_address being correct, but the load
+                        // map itself causing us to copy data over pre-checked data elsewhere. this is acceptable though
+                        // as if we're signed, you will have have to sign off on the fact that that's what you meant to do!
+                        call_s_varm_crit_mem_copy_by_words((uint32_t *) to_storage_addr,
+                                                           inline_s_resolve_ram_or_absolute_flash_addr(from_storage_addr), size);
+                    } else {
+                        hx_assert_equal2i(to_storage_addr, from_storage_addr_check);
+                    }
                 }
                 if (do_hash) {
                     if (cosign_contents_block) {
@@ -907,20 +1071,24 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
                             cosign_covered = hx_true();
                         }
                     }
-                    uint32_t *src = resolve_ram_or_absolute_flash_addr(to_storage_addr);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+                    // force reload of runtime_address from the etry, and re-calculate expected to_storage_address value
+                    uint to_storage_addr_check = ((volatile picobin_load_map_entry *)entry)->runtime_address + runtime_address_to_storage_addr;
+#pragma GCC diagnostic pop
+                    hx_assert_equal2i(to_storage_addr_check, to_storage_addr);
+                    register uint32_t *src_check = inline_s_resolve_ram_or_absolute_flash_addr(to_storage_addr_check);
+                    register uint32_t *src asm ("r1") = inline_s_resolve_ram_or_absolute_flash_addr(to_storage_addr);
+                    hx_assert_equal2i((uintptr_t)src, (uintptr_t)src_check);
+                    hx_assert_equal2i((uintptr_t)src_check, (uintptr_t)src);
                     printf("  hash %08x + %08x (orig %08x + %08x)\n", (uint)src, size, (uint) from_storage_addr, (uint) size);
-                    sb_sha256_update_32(&sha, src, size&~3u);
-                    // pad with zero bytes because we can't mix 32 byte and 8 byte writes in the same block
-                    if (size & 3) {
-                        uint32_t last_word = src[size/4];
-                        last_word &= (1u << (size * 8u)) - 1;
-                        s_varm_sha256_put_word_inc(last_word, &sha);
-                    }
+                    sb_sha256_update_32(&sha, src, size);
+                    hx_check_step_nodelay(STEPTAG_S_SHA256_UPDATE_32 + 1);
                 }
             }
         }
 
-        signature_workspace_t *signature_workspace = &ctx->scan_workarea->block_buffer_or_signature_workspace.signature_workspace;
+        signature_workspace_t *signature_workspace = __get_opaque_ptr(&ctx->scan_workarea->block_buffer_or_signature_workspace.signature_workspace);
         inline_s_set_ram_ro_xn(ctx->mpu_on_arm);
         uint32_t hash_count1 = sha.total_bytes;
         register uint32_t *hash_words asm ("r0") = &signature_workspace->hash.words[0];
@@ -933,6 +1101,7 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
         if (do_hash) {
             printf("  hash block offsets %08x -> %08x\n", 0, parsed_block->hash_def_block_words_included * 4);
             sb_sha256_update_32(&sha, block_data, parsed_block->hash_def_block_words_included * 4);
+            hx_check_step_nodelay(STEPTAG_S_SHA256_UPDATE_32 + 1);
             sb_sha256_finish(&sha, signature_workspace->hash.bytes);
         }
         uint32_t hash_count2 = sha.total_bytes;
@@ -965,10 +1134,29 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
                 // Decrypt signature hash using signature key, and check against actual observed image hash
                 const sb_sw_public_t *public_key = (const sb_sw_public_t *)(block_data + parsed_block->public_key_word_index);
                 const sb_sw_signature_t *signature = (const sb_sw_signature_t *)(block_data + parsed_block->signature_word_index);
+                // this is a little ugly, but we know:
+                //
+                // 1. parsed_block is in RAM
+                // 2. we only do a signature check once (hx_is_null(parsed_block->verified) check above)
+                //
+                // ... therefore it is ok to modify the signature here, and not worry about putting it back how it was afterwards
+                //
+                // the opposite modification has been made earlier during parse_block(); the benefits of the word modification here are:
+                //
+                // 1. we verify parsed_block is indeed in RAM (at least during boot path it is in USB RAM AND the flash is
+                //    read-only via MPU) so a spoofed pointer into flash will not work
+                // 2. a canned block somewhere in RAM will not work, as the signature is modified with a per boot canary value
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+                ((sb_sw_signature_t *)signature)->words[0] -= rcp_canary_get_nodelay(CTAG_SIG_DISRUPTER);
+#pragma GCC diagnostic pop
 
+                register const sb_sw_message_digest_t *hash asm ("r2") = __get_opaque_ptr(&signature_workspace->hash);
+                void *hash_check = &ctx->scan_workarea->block_buffer_or_signature_workspace.signature_workspace.hash;
+                hx_assert_equal2i((uintptr_t)hash, (uintptr_t)hash_check);
                 sig_matches_image_keyx = s_arm8_verify_signature_secp256k1(signature_workspace->sig_context_buffer,
                                                                           &public_key[0],
-                                                                          &signature_workspace->hash,
+                                                                          hash,
                                                                           &signature[0]);
                 printf("  sig check ok=%d %08x %08x\n", hx_is_xtrue(sig_matches_image_keyx), (int)signature->words[0], (int)signature->words[15]);
 
@@ -1019,8 +1207,7 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
         parsed_block->verified = hx_false();
     verify_done:
         // Ensure memory is returned to RO on all paths (some may do this earlier)
-        inline_s_set_flash_ro_xn(ctx->mpu_on_arm);
-        inline_s_set_ram_ro_xn(ctx->mpu_on_arm);
+        inline_s_set_flash_ram_ro_xn(ctx->mpu_on_arm);
         parsed_block->verify_diagnostic |= hx_is_true(parsed_block->verified) ? BOOT_PARSED_BLOCK_DIAGNOSTIC_VERIFIED_OK : 0;
 #if MINI_PRINTF
         printf("  block verified ok? %d\n", hx_is_true(parsed_block->verified));
@@ -1036,7 +1223,7 @@ hx_bool s_varm_crit_ram_trash_verify_block(boot_scan_context_t *ctx, hx_bool sig
 
 void s_varm_crit_init_block_scan(block_scan_t *bs, const boot_scan_context_t *ctx, uint32_t window_rel_search_start_offset, uint32_t first_block_search_size) {
     static_assert(sizeof(block_scan_t) % 4 == 0, "");
-    s_varm_step_safe_crit_mem_erase_by_words_const_size((uintptr_t)bs, sizeof(block_scan_t), true);
+    call_s_varm_step_safe_crit_mem_erase_by_words_const_size((uintptr_t)bs, sizeof(block_scan_t), true);
     bs->ctx = ctx;
     bs->window_rel_next_read_word_offset = window_rel_search_start_offset / 4;
     bs->window_rel_first_block_word_offset = -1;

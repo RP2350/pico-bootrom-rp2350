@@ -41,7 +41,7 @@ typedef uint32_t flash_permission_mask_t;
 
 typedef uintptr_t storage_addr_t;
 
-static inline flash_offset_t s_varm_flash_translate_storage_addr_to_offset(storage_addr_t addr) {
+static inline flash_offset_t inline_s_varm_flash_translate_storage_addr_to_offset(storage_addr_t addr) {
 	return (flash_offset_t)(addr - XIP_BASE);
 }
 
@@ -51,10 +51,10 @@ static inline flash_offset_t s_varm_flash_translate_storage_addr_to_offset(stora
 int s_varm_flashperm_get_partition_num_from_storage_address(storage_addr_t addr);
 
 // Default partition entry when nothing was found, defines the permissions of unpartitioned space
-static __force_inline resident_partition_t s_varm_flashperm_get_default_partition(void) {
+static __force_inline resident_partition_t inline_s_varm_flashperm_get_default_partition(const resident_partition_table_t *pt) {
     // we expect it to have been loaded when this is called
     bootrom_assert(MISC, bootram->always.partition_table.loaded);
-    const resident_partition_table_t *pt = &bootram->always.partition_table;
+	bootrom_assert(MISC, pt == &bootram->always.partition_table);
     return (resident_partition_t) {
 		// Default partition is always max possible size -- don't worry about chip select address
 		// hole as that is checked separately when validating address spans
@@ -82,7 +82,7 @@ static __force_inline resident_partition_t s_varm_flashperm_get_default_partitio
 //}
 
 // Check that a given partition has ALL the specified permission flags
-static __force_inline bool s_varm_flashperm_partition_has_permissions(resident_partition_t partition, flash_permission_mask_t required_permissions) {
+static __force_inline bool inline_s_varm_flashperm_partition_has_permissions(resident_partition_t partition, flash_permission_mask_t required_permissions) {
 	// The permissions are stored redundantly in the two halves of the entry, and when a bit
 	// differs, we take the less-permissive value (bitwise AND)
 	uint32_t actual_permissions = (
@@ -99,17 +99,18 @@ static __force_inline bool s_varm_flashperm_partition_has_permissions(resident_p
 #endif
 
 // Check that a given partition number in the resident table has ALL the specified permission flags
-static __force_inline bool s_varm_flashperm_partition_num_has_permissions(int partition_num, flash_permission_mask_t required_permissions) {
+static __force_inline bool inline_s_varm_flashperm_partition_num_has_permissions(int partition_num, flash_permission_mask_t required_permissions) {
+    resident_partition_table_t *pt = __get_opaque_ptr(&bootram->always.partition_table);
 	if (partition_num == PARTITION_TABLE_NO_PARTITION_INDEX) {
-		return s_varm_flashperm_partition_has_permissions(s_varm_flashperm_get_default_partition(), required_permissions);
+		return inline_s_varm_flashperm_partition_has_permissions(inline_s_varm_flashperm_get_default_partition(pt),
+                                                                 required_permissions);
 	} else {
 #if BOOTROM_ASSERT_FLASH_PERMISSIONS_ENABLE // because of need for include
         bootrom_assert(FLASH_PERMISSIONS, inline_s_is_resident_partition_table_loaded());
 #endif
-		resident_partition_table_t *pt = __get_opaque_ptr(&bootram->always.partition_table);
         if (partition_num >= 0 && partition_num < pt->permission_partition_count) {
-            return s_varm_flashperm_partition_has_permissions(pt->partitions[partition_num],
-                                                              required_permissions);
+            return inline_s_varm_flashperm_partition_has_permissions(pt->partitions[partition_num],
+                                                                     required_permissions);
         } else {
             return false;
         }
@@ -126,7 +127,7 @@ static __force_inline bool s_varm_flashperm_partition_num_has_permissions(int pa
 
 // Check that a given span of flash storage addresses has ALL the specified permission flags, and
 // does not start/end in different partitions.
-static __force_inline bool s_varm_flashperm_storage_addr_span_has_permissions(storage_addr_t start_addr, uint32_t size, flash_permission_mask_t required_permissions) {
+static __force_inline bool inline_s_varm_flashperm_storage_addr_span_has_permissions(storage_addr_t start_addr, uint32_t size, flash_permission_mask_t required_permissions) {
 	// The span itself must be valid, e.g. no crossing of an address hole between two flash devices.
 	if (!s_varm_crit_flash_check_in_bounds_addr_span(start_addr - XIP_BASE, size)) {
 		return false;
@@ -143,5 +144,5 @@ static __force_inline bool s_varm_flashperm_storage_addr_span_has_permissions(st
 	}
 
 	// Permissions of the span are the permissions of the startpoint
-	return s_varm_flashperm_partition_num_has_permissions(pnum_at_start, required_permissions);
+	return inline_s_varm_flashperm_partition_num_has_permissions(pnum_at_start, required_permissions);
 }

@@ -226,4 +226,35 @@ static_assert(offsetof(bootram_t, always.boot_diagnostic) == BOOTRAM_ALWAYS_BOOT
 static_assert(offsetof(bootram_t, always.secure) == BOOTRAM_ALWAYS_SECURE_OFFSET, "");
 static_assert(offsetof(bootram_t, nsboot.arm.secure_stack) == BOOTRAM_NSBOOT_SECURE_STACK_OFFSET, "");
 static_assert(sizeof(((bootram_t*)0)->nsboot.arm.secure_stack) == BOOTRAM_NSBOOT_SECURE_STACK_SIZE, "");
+
+static __force_inline typeof(bootram->always) *get_always_ptr(void) {
+    typeof(bootram->always) *always;
+    pico_default_asm(
+        "ldr %[always], [%[zero], %[always_offset]]\n"
+        : [always] "=l" (always)
+        : [zero] "l" (0), [always_offset] "i" (ALWAYS_POINTER_OFFSET)
+    );
+    return always;
+}
+
+static __force_inline typeof(bootram->always.boot_type_and_diagnostics) *get_always_boot_type_and_diagnostics_ptr(void) {
+    uintptr_t addr = ((uintptr_t)get_always_ptr()) + offsetof(bootram_t, always.boot_type_and_diagnostics) - offsetof(bootram_t, always);;
+    return (typeof(bootram->always.boot_type_and_diagnostics) *) addr;
+}
+
+static __force_inline typeof(bootram->always.diagnostic_partition_index) *get_always_diagnostic_partition_index_ptr(void) {
+    uintptr_t addr = ((uintptr_t)get_always_ptr()) + offsetof(bootram_t, always.diagnostic_partition_index) - offsetof(bootram_t, always);;
+    return (typeof(bootram->always.diagnostic_partition_index) *) addr;
+}
+
+static __force_inline resident_partition_table_t *get_partition_table_ptr(void) {
+    resident_partition_table_t *pt;
+    pico_default_asm(
+            "ldr %[pt], [%[zero], %[pt_offset]]\n"
+    : [pt] "=l" (pt)
+    : [zero] "l" (0), [pt_offset] "i" (PARTITION_TABLE_POINTER_OFFSET)
+    );
+    return pt;
+}
+
 #endif

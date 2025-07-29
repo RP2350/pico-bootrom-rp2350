@@ -69,10 +69,14 @@ void s_varm_crit_ram_trash_perform_flash_scan_and_maybe_run_image(flash_boot_sca
 
     flash_ctx->boot_context.current_search_window.base = inline_s_xip_window_base_from_offset(0);
     // we just want to search the first chip select
-    flash_ctx->boot_context.current_search_window.size = s_varm_flash_devinfo_get_size(0);
+    flash_ctx->boot_context.current_search_window.size = inline_s_varm_flash_devinfo_get_size(0);
 
-    uint slot_size = inline_s_otp_read_ecc_guarded(OTP_DATA_FLASH_PARTITION_SLOT_SIZE_ROW);
-    slot_size = hx_is_true(hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_OVERRIDE_FLASH_PARTITION_SLOT_SIZE_LSB)) ? slot_size : 0;
+    check_ecc_pair(OTP_DATA_FLASH_DEVINFO_ROW, OTP_DATA_FLASH_PARTITION_SLOT_SIZE_ROW);
+    // RP2350-E17; not using guarded read as sibling ECC row is enabled by a different bit
+    // uint slot_size = hx_is_true(call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_OVERRIDE_FLASH_PARTITION_SLOT_SIZE_LSB)) ?
+    //     inline_s_otp_read_ecc_guarded(OTP_DATA_FLASH_PARTITION_SLOT_SIZE_ROW) : 0;
+    uint slot_size = hx_is_true(call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_OVERRIDE_FLASH_PARTITION_SLOT_SIZE_LSB)) ?
+         inline_s_otp_read_ecc(OTP_DATA_FLASH_PARTITION_SLOT_SIZE_ROW) : 0;
     slot_size = (slot_size + 1) << 12u;
     printf("SLOT size %08x\n", slot_size);
 
@@ -139,8 +143,7 @@ void s_varm_crit_ram_trash_perform_flash_scan_and_maybe_run_image(flash_boot_sca
 #endif
                     // we look for the first bootable partition, including picking amongst A/B partitions based on which bootable IMAGE_DEF
                     // has the highest version
-                    uintptr_t pt_addr = __get_opaque_ptr(BOOTRAM_BASE + offsetof(bootram_t, always.partition_table));
-                    resident_partition_table_t *pt = (resident_partition_table_t *)pt_addr;
+                    resident_partition_table_t *pt = get_partition_table_ptr();
                     for (uint pi = 0; pi < pt->partition_count; pi++) {
                         const resident_partition_t *partition = &pt->partitions[pi];
                         printf("  looking at partition %d %08x->%08x\n", pi, inline_s_partition_start_offset(partition), inline_s_partition_end_offset(partition));
@@ -219,7 +222,7 @@ int s_varm_crit_choose_by_tbyb_flash_update_boot_and_version(boot_scan_context_t
     // note X is slot 0, or partition A
     // note Y is slot 1, or partition B
     parsed_block_loop_t *block_loop_x = &ctx->scan_workarea->parsed_block_loops[0];
-    parsed_block_loop_t *block_loop_y = &ctx->scan_workarea->parsed_block_loops[1];
+    parsed_block_loop_t *block_loop_y = __get_opaque_ptr(&ctx->scan_workarea->parsed_block_loops[1]);
     parsed_block_t *block_x = (parsed_block_t *)((uintptr_t)block_loop_x + block_loop_struct_offset);
     parsed_block_t *block_y = (parsed_block_t *)((uintptr_t)block_loop_y + block_loop_struct_offset);
 #if MINI_PRINTF
@@ -232,7 +235,7 @@ int s_varm_crit_choose_by_tbyb_flash_update_boot_and_version(boot_scan_context_t
     check_diagnostic_is_aligned(diagnostic);
     uint32_t version_downgrade_erase_flash_addr = 0;
     if (is_block_populated(block_y)) {
-        bool greater_y = !is_block_populated(block_x) || is_version_greater(block_y, block_x);
+        bool greater_y = !is_block_populated(block_x) || inline_is_version_greater(block_y, block_x);
         // if we're trying X, then we may later want to poison Y
         if (is_block_populated(block_x) && ctx->flash_update_boot_offset == block_loop_x->flash_start_offset) {
             printf("  Verifying %s in %s, since is is the flash update, and we must decide on erasing %s in %s\n",
@@ -302,8 +305,8 @@ int s_varm_crit_choose_by_tbyb_flash_update_boot_and_version(boot_scan_context_t
                     //       i.e. up to the data)
                     // copy Y into X as it is newer or the only valid one
                     static_assert(sizeof(*block_loop_y) % 4 == 0, "");
-                    s_varm_crit_mem_copy_by_words((uint32_t *) block_loop_x, (const uint32_t *) block_loop_y,
-                                               sizeof(*block_loop_y));
+                    call_s_varm_crit_mem_copy_by_words((uint32_t *) block_loop_x, (const uint32_t *) block_loop_y,
+                                                       sizeof(*block_loop_y));
                     diagnostic[1] = BOOT_DIAGNOSTIC_CHOSEN;
                     rc = 1;
                     goto update_boot_and_version_done;
@@ -345,7 +348,7 @@ static bool s_varm_crit_ram_trash_pick_boot_slot(flash_boot_scan_context_t *flas
     parsed_block_loop_t *slot0 = slots;
 
     // we only tore diagnostics if we're asked to look at SLOT0 or SLOT1
-    uint32_t *diagnostic32 = s_varm_init_diagnostic32(bootram->always.diagnostic_partition_index <= -2 && hx_is_true(flash_ctx->boot_context.booting));
+    uint32_t *diagnostic32 = call_s_varm_init_diagnostic32(bootram->always.diagnostic_partition_index <= -2 && hx_is_true(flash_ctx->boot_context.booting));
     flash_ctx->boot_context.diagnostic = (uint16_t *)diagnostic32;
 //    printf("*** SET DIAG SLOT %p\n", flash_ctx->boot_context.diagnostic);
 
@@ -424,8 +427,8 @@ static void s_varm_crit_latch_block(parsed_block_t *target_parsed_block, uint32_
     bootrom_assert(BLOCK_SCAN, target_parsed_block != source_parsed_block);
     bootrom_assert(BLOCK_SCAN, source_parsed_block->block_data);
     hx_assert_equal2i(source_parsed_block->block_data != NULL, 1);
-    s_varm_crit_mem_copy_by_words((uint32_t *) target_parsed_block, (const uint32_t *) source_parsed_block, parsed_block_size_words * 4u);
-    s_varm_crit_mem_copy_by_words(target_parsed_block_data, source_parsed_block->block_data, source_parsed_block->block_size_words * 4u);
+    call_s_varm_crit_mem_copy_by_words((uint32_t *) target_parsed_block, (const uint32_t *) source_parsed_block, parsed_block_size_words * 4u);
+    call_s_varm_crit_mem_copy_by_words(target_parsed_block_data, source_parsed_block->block_data, source_parsed_block->block_size_words * 4u);
     // make sure we point at the new copy of the data
     target_parsed_block->block_data = target_parsed_block_data;
     hx_check_step_nodelay(STEPTAG_S_VARM_CRIT_LATCH_BLOCK);
@@ -439,6 +442,9 @@ bool s_varm_crit_search_window(const boot_scan_context_t *ctx, uint32_t range_ba
     canary_entry(S_VARM_CRIT_SEARCH_WINDOW);
     bool rc;
     block_scan_t bs;
+
+    // this erase is technically superfluous
+    call_s_varm_step_safe_crit_mem_erase_by_words_const_size((uintptr_t)parsed_block_loop, sizeof(parsed_block_loop_t), false);
 
     // we want to set fso to 0 for RAM, otherwise to range_base + ctx->current_search_window.base - XIP_BASE
 
@@ -599,7 +605,7 @@ void s_varm_crit_ram_trash_verify_parsed_blocks(boot_scan_context_t *ctx, parsed
         // we need a covering signature (of pt by image_def) if partition table requires sig, and we have one, but it hasn't
         // yet been signature_verified.
         // note: this does not need to be hx_bool, because worst case is you can cause the wrong thing to be considered for boot
-        //       but it would still have to be correctly signed.
+        //       but it would still have to be correctly signed and rollback versioned (if necessary)
         bool covering_sig_required = is_block_populated(&parsed_block_loop->partition_table.core) &&
                                      is_block_signature_verified(&parsed_block_loop->partition_table.core) &&
                                      hx_is_true(ctx->signed_partition_table_required);
@@ -617,18 +623,21 @@ void s_varm_crit_ram_trash_verify_parsed_blocks(boot_scan_context_t *ctx, parsed
 }
 
 static bool s_varm_crit_prefer_block_common(hx_bool secure, parsed_block_t *current_block, parsed_block_t *candidate_block) {
-    // we always accept a canidate block if we don't have one yet
+    // we always accept a candidate block if we don't have one yet
     if (is_block_populated(current_block)) {
         if (!hx_is_null(candidate_block->verified)) {
             // only way we should have a value for verified at this point, is if parse_block marked it false
             // because it didn't parse it fully; either it didn't understand it (potentially from the future),
-            // or it was for example an executable not for RP2350
+            // or it was for example an executable not intended for RP2350
             bootrom_assert(BLOCK_SCAN, hx_is_false(candidate_block->verified));
             printf(".. ignored because it was not accepted by parsing\n");
             return false;
         }
 
         // ignore block with the wrong signature key if we already have one with the right sig key (and this is secure mode)
+        //
+        // again if this is glitched to do the wrong thing, we may try to boot the wrong image but
+        // is must pass signature and rollback checks if necessary
         if (hx_is_true(secure) &&
             hx_is_xtrue(current_block->sig_otp_key_match_and_block_hashed) &&
             hx_is_xfalse(candidate_block->sig_otp_key_match_and_block_hashed)) {
@@ -676,9 +685,10 @@ bool s_varm_crit_load_init_context_and_prepare_for_resident_partition_table_load
     canary_entry(S_VARM_CRIT_LOAD_INIT_CONTEXT_AND_PREPARE_FOR_RESIDENT_PARTITION_TABLE_LOAD);
     // first we need to locate the partition table (note we do not need to verify image_def signatures here
     // as we just care about partition tables - this saves us wasting time on image verification)
-    hx_bool hx_false_value = s_varm_crit_get_non_booting_boot_scan_context(scan_workarea,
+    hx_bool hx_false_value = inline_s_varm_crit_get_non_booting_boot_scan_context(scan_workarea,
                                                   true, // executable_image_def_only
                                                   true); // verify_image_defs_without_signatures
+    hx_assert_false(hx_false_value);
     scan_workarea->ctx_holder.ctx.dont_scan_for_partition_tables = hx_false_value; // always scan for partition table
     scan_workarea->ctx_holder.ctx.flash_mode = 0;
     scan_workarea->ctx_holder.ctx.flash_clkdiv = BOOTROM_SPI_CLKDIV_NSBOOT;
@@ -711,12 +721,12 @@ bool s_varm_crit_load_init_context_and_prepare_for_resident_partition_table_load
     canary_exit_return(S_VARM_CRIT_LOAD_INIT_CONTEXT_AND_PREPARE_FOR_RESIDENT_PARTITION_TABLE_LOAD, rc);
 }
 
-__force_inline hx_bool s_varm_crit_get_non_booting_boot_scan_context(scan_workarea_t *scan_workarea, bool executable_image_def_only, bool verify_image_defs_without_signatures) {
+__force_inline hx_bool inline_s_varm_crit_get_non_booting_boot_scan_context(scan_workarea_t *scan_workarea, bool executable_image_def_only, bool verify_image_defs_without_signatures) {
     // bit dumpster for ARM and RISC-V (we don't want to affect the MPU at this point)
-    mpu_hw_t *mpu_on_arm = get_fake_mpu_sau();
-    s_varm_crit_init_boot_scan_context(scan_workarea,
-                                       mpu_on_arm,
-                                       executable_image_def_only);
+    mpu_hw_t *mpu_on_arm = inline_s_get_fake_mpu_sau();
+    hx_check_bool(s_varm_crit_init_boot_scan_context(scan_workarea,
+                                                     mpu_on_arm,
+                                                     executable_image_def_only));
 
     boot_scan_context_t *ctx = &scan_workarea->ctx_holder.ctx;
     ctx->booting = hx_false();
@@ -735,9 +745,8 @@ int s_varm_api_crit_get_b_partition(uint pi_a) {
     canary_set_step(STEPTAG_S_VARM_CRIT_B_PARTITION);
     bootrom_assert(MISC, inline_s_is_resident_partition_table_loaded());
     // slightly painful, but so is GCC
-    uintptr_t pt_addr = BOOTRAM_BASE + offsetof(bootram_t, always.partition_table);
-    resident_partition_table_t *pt = (resident_partition_table_t *)pt_addr;
-    uintptr_t p_addr = __get_opaque_value(pt_addr) + offsetof(resident_partition_table_t,partitions[0]);
+    resident_partition_table_t *pt = get_partition_table_ptr();
+    uintptr_t p_addr = ((uintptr_t)pt) + offsetof(resident_partition_table_t,partitions[0]);
     resident_partition_t *partition = (resident_partition_t *)p_addr;
     int rc = BOOTROM_ERROR_NOT_FOUND;
     for(int pi=0; pi < pt->partition_count; pi++) {
@@ -795,9 +804,7 @@ static void
 s_varm_crit_init_resident_partition_table_from_buffer(boot_scan_context_t *ctx, parsed_block_loop_t *parsed_block_loop) {
     canary_entry(S_VARM_CRIT_INIT_RESIDENT_PARTITION_TABLE_FROM_BUFFER);
     parsed_partition_table_t *partition_table = &parsed_block_loop->partition_table;
-    uintptr_t rpt_addr = BOOTRAM_BASE + offsetof(bootram_t, always.partition_table);
-    rpt_addr = __get_opaque_value(rpt_addr);
-    resident_partition_table_t *rpt = (resident_partition_table_t *)rpt_addr;
+    resident_partition_table_t *rpt = get_partition_table_ptr();
     static_assert(offsetof(resident_partition_table_t, partition_count) == offsetof(resident_partition_table_t, counts_and_load_flag), "");
     static_assert(offsetof(resident_partition_table_t, permission_partition_count) == offsetof(resident_partition_table_t, counts_and_load_flag) + 1, "");
     static_assert(offsetof(resident_partition_table_t, loaded) == offsetof(resident_partition_table_t, counts_and_load_flag) + 2, "");
@@ -832,7 +839,8 @@ s_varm_crit_init_resident_partition_table_from_buffer(boot_scan_context_t *ctx, 
             if (words >= 0) {
                 bootrom_assert(FLASH_BOOT, words == partition_table->partition_count * 2);
                 // note the PT item starts 1 word into the block by definition
-                bootrom_assert(MISC, PICOBIN_BLOCK_ITEM_PARTITION_TABLE == (uint8_t)*resolve_ram_or_absolute_flash_addr( partition_table->core.enclosing_window.base + partition_table->core.window_rel_block_offset + 4));
+                bootrom_assert(MISC, PICOBIN_BLOCK_ITEM_PARTITION_TABLE == (uint8_t)*inline_s_resolve_ram_or_absolute_flash_addr(
+                        partition_table->core.enclosing_window.base + partition_table->core.window_rel_block_offset + 4));
                 rpt->secure_item_address = partition_table->core.enclosing_window.base + partition_table->core.window_rel_block_offset + 4;
                 printf("Resident partition table came from flash at %08x\n",
                        rpt->secure_item_address - 4);
@@ -913,7 +921,7 @@ void s_varm_crit_ram_trash_pick_ab_image_part1(boot_scan_context_t *ctx, uint pi
     // can be negative for error, or should be in range
     bootrom_assert(FLASH_BOOT, bpi < pt->partition_count);
     resident_partitions[1] = bpi >= 0 ? &pt->partitions[bpi] : 0;
-    uint32_t *diagnostic32 = s_varm_init_diagnostic32((int8_t)pi == gcc_avoid_single_movw_plus_ldr(bootram->always.diagnostic_partition_index) &&
+    uint32_t *diagnostic32 = call_s_varm_init_diagnostic32((int8_t)pi == gcc_avoid_single_movw_plus_ldr(bootram->always.diagnostic_partition_index) &&
         hx_is_true(ctx->booting));
     ctx->diagnostic = (uint16_t *)diagnostic32;
 //    printf("*** SET DIAG AB %p\n", ctx->diagnostic);
@@ -935,7 +943,7 @@ void s_varm_crit_ram_trash_pick_ab_image_part1(boot_scan_context_t *ctx, uint pi
 }
 
 // note this method does not check the validity of the address
-__force_inline uint32_t *resolve_ram_or_absolute_flash_addr(uint32_t addr) {
+__force_inline uint32_t *inline_s_resolve_ram_or_absolute_flash_addr(uint32_t addr) {
     // note: we only do noalloc/notranslate on CS0 since we want CS1 to be usable as RAM (and
     // we do not do any translation on it in the boot path ourselves)
     static_assert(((XIP_BASE + (MAX_FLASH_ADDR_OFFSET / 2u)) & 0xffffffu) == 0, "");

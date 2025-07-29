@@ -381,3 +381,5 @@ in_usb_ram:
     adds r_t1, #5
     lsrs r_ok1, r_t1, #3
     b combine_results
+
+    // note this falls thru to s_varm_api_enter_cmd_xip, which may return to caller but not with correct rcp values

@@ -1,6 +1,6 @@
 # Overview
 
-This is the A3 version of the RP2350 bootrom.
+This is the A4 version of the RP2350 bootrom.
 
 The source is provided for reference purposes. Whilst you can build a matching binary if you use the exact right compilers, it may be simpler just to use the ELFs with debug info provided as part of the release artifacts. 
 

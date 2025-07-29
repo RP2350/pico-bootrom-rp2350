@@ -21,7 +21,7 @@ s_native_crit_launch_nsboot:
 .p2align 2 // so adr is 2 byte - we should be aligned already
     // note r3 is MULTIPLEX_s_native_crit_launch_nsboot on entry
     movs r0, #M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS
-    adr r7, nsboot_vm_constants
+    movw r7, P16(nsboot_vm_constants)
     ldmia r7!, {r4, r5, r6}
     // r4 = PPB_NONSEC_BASE + M33_VTOR_OFFSET
     // r5 = ACCESSCTRL_PASSWORD_BITS | ACCESSCTRL_UART0_CORE0_BITS | ACCESSCTRL_UART0_SP_BITS | ACCESSCTRL_UART0_NSP_BITS | ACCESSCTRL_USBCTRL_DBG_BITS
@@ -186,7 +186,9 @@ nsboot_vm_no_gpio:
     ldmia r0, {r1-r12,lr}
     // hardening: done
     bxns  r0
+.section .rodata.nsboot_vm_constants
 .p2align 2
+.global nsboot_vm_constants
 nsboot_vm_constants:
     .word PPB_NONSEC_BASE + M33_VTOR_OFFSET
     .word ACCESSCTRL_PASSWORD_BITS | ACCESSCTRL_UART0_CORE0_BITS | ACCESSCTRL_UART0_SP_BITS | ACCESSCTRL_UART0_NSP_BITS | ACCESSCTRL_USBCTRL_DBG_BITS
@@ -197,7 +199,7 @@ nsboot_vm_constants:
     .word SRAM_END - 32 + M33_SAU_RLAR_ENABLE_BITS
 
 // if 0 we can use the BOOTRAM_BASE constant from elsewhere
-#if 0 && BOOTRAM_XIP_SETUP_CODE_OFFSET == BOOTRAM_NSBOOT_SECURE_STACK_OFFSET
+#if BOOTRAM_XIP_SETUP_CODE_OFFSET == BOOTRAM_NSBOOT_SECURE_STACK_OFFSET
 .global xip_setup_func_ptr
 xip_setup_func_ptr:
 #endif

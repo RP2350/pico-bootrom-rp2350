@@ -139,6 +139,7 @@ static void __noinline __attribute__((naked)) s_varm_otp_sbpi_write_byte(__unuse
             // size: this could be b.n if we moved wait_sbpi_done out of SG region
             // (worth 4 bytes due to literal pool alignment)
             "b s_varm_otp_wait_sbpi_done\n"
+            "udf #0\n"
             :
             : [flags] "i" ((1u     << OTP_SBPI_INSTR_IS_WR_LSB          ) |
                            (1u     << OTP_SBPI_INSTR_HAS_PAYLOAD_LSB    ) |
@@ -241,13 +242,13 @@ static inline uint32_t inline_s_even_parity(uint32_t input) {
     // smaller, unfortunately
     uint32_t scratch;
     pico_default_asm (
-        "movs %1, #0\n"
+        "movs %[scratch], #0\n"
     "1:"
-        "eors %1, %0\n"
-        "lsls %0, #1\n"
+        "eors %[scratch], %[in_out]\n"
+        "lsls %[in_out], #1\n"
         "bne 1b\n"
-        "lsrs %0, %1, 31\n"
-        : "+l" (input), "=l" (scratch)
+        "lsrs %[in_out], %[scratch], 31\n"
+        : [in_out] "+l" (input), [scratch] "=l" (scratch)
         :
         : "cc"
     );
@@ -319,7 +320,15 @@ int __used s_varm_api_hx_otp_access(aligned4_uint8_t *buf, uint32_t buf_len, otp
     printf("OTP %s 0x%04x ecc=%d buf=%p len=%d\n", is_write ? "WRITE" : "READ ",
            base_row, is_ecc, buf, (int)buf_len);
 
+    static_assert(~OTP_CMD_BITS == 0xfffc0000, "");
+#if !ASM_SIZE_HACKS
     if (cmd.flags & ~OTP_CMD_BITS || base_row + num_rows > NUM_OTP_ROWS) {
+#else
+    static_assert(~OTP_CMD_BITS == 0xfffc0000, "");
+    static_assert((((int)~OTP_CMD_BITS) >> 17) != -1, "");
+    static_assert((((int)~OTP_CMD_BITS) >> 18) == -1, "");
+    if ((cmd.flags >> 18) || base_row + num_rows > NUM_OTP_ROWS) {
+#endif
         rc = BOOTROM_ERROR_INVALID_ARG;
     } else if (((uintptr_t)buf | buf_len) & (is_ecc ? 0x1 : 0x3)) {
         rc = BOOTROM_ERROR_BAD_ALIGNMENT;
@@ -399,7 +408,7 @@ int __used s_varm_api_hx_otp_access(aligned4_uint8_t *buf, uint32_t buf_len, otp
                 // note: we expect user to verify the data was written correctly
             } else {
                 if (is_ecc) {
-                    *(uint16_t *)buf = inline_s_otp_read_ecc(row);
+                    *(uint16_t *)buf = (uint16_t) inline_s_otp_read_ecc(row);
                 } else {
                     *(uint32_t *)buf = current_val;
                 }

@@ -148,6 +148,7 @@ SECTIONS {
         . = ORIGIN(ROMSG) + LENGTH(ROMSG);
         PROVIDE(__end_of_secure_gateways = .);
     } >ROMSG =0x0000
+    ASSERT(__sg_bootpath_needed_start_roundup_32 == ${SG_BOOTPATH_NEEDED_START_ROUNDUP_32}, "__sg_bootpath_needed_start_roundup_32 is in the wrong place")
 
     .data : {
         *(.data*)
@@ -172,6 +173,11 @@ SECTIONS {
         "ERROR: do not use BSS memory in bootrom! (.bss)")
     ASSERT(SIZEOF(.allowed_bss) == ${BOOTRAM_ARM_STATIC_DATA_SIZE}, "allowed_bss size mismatch")
 
+    ASSERT(cpacr == ${CPACR_OFFSET}, "cpacr at wrong place")
+    ASSERT(tt_value == ${TT_VALUE_OFFSET}, "tt_value at wrong place")
+    ASSERT(always_pointer  == ${ALWAYS_POINTER_OFFSET}, "always_pointer at wrong place")
+    ASSERT(partition_table_pointer == ${PARTITION_TABLE_POINTER_OFFSET}, "partition_table_pointer at wrong place")
+    ASSERT(msc_pointer == ${MSC_POINTER_OFFSET}, "msc_pointer at wrong place")
     sau_rlar = ${BOOTROM_SG_END} - 32 + 1/*M33_SAU_RLAR_ENABLE_BITS*/;
 
     INCLUDE "${P16_ASSERTS_LINKER_SCRIPT}"

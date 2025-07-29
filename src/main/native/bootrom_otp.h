@@ -80,7 +80,19 @@ extern otp_raw_row_value_t otp_data_raw_guarded[NUM_OTP_ROWS];
 #define bootrom_otp_inline static inline
 
 // Read 16-bit ECC-protected value from OTP
-bootrom_otp_inline uint16_t inline_s_otp_read_ecc(uint row) {
+bootrom_otp_inline uint32_t inline_s_otp_read_ecc(uint row) {
+#if ASM_SIZE_HACKS
+    if (__builtin_constant_p(row)) {
+        uint32_t rc;
+        row = (row & OTP_ROW_MASK) * 2 - 0xa0;
+        pico_default_asm(
+                "ldrh %[rc], [%[base], %[row]]"
+                : [rc] "=l" (rc)
+                : [base] "l" (otp_data + 0x50), [row] "i" (row)
+        );
+        return rc;
+    }
+#endif
     return otp_data[row & OTP_ROW_MASK];
 }
 
@@ -91,9 +103,9 @@ bootrom_otp_inline uint32_t inline_s_otp_read_ecc_guarded(uint row) {
         uint32_t rc;
         row = (row & OTP_ROW_MASK) * 2 - 0xa0;
         pico_default_asm(
-                "ldrh %0, [%1, %2]"
-                : "=l" (rc)
-                : "l" (otp_data_guarded + 0x50), "i" (row)
+                "ldrh %[rc], [%[base], %[row]]"
+                : [rc] "=l" (rc)
+                : [base] "l" (otp_data_guarded + 0x50), [row] "i" (row)
         );
         return rc;
     }
@@ -108,9 +120,9 @@ bootrom_otp_inline uint32_t inline_s_otp_read_ecc2_guarded(uint row) {
         uint32_t rc;
         row = (row & OTP_ROW_MASK) * 2 - 0xa0;
         pico_default_asm(
-                "ldr %0, [%1, %2]"
-        : "=l" (rc)
-        : "l" (otp_data_guarded + 0x50), "i" (row)
+                "ldr %[rc], [%[base], %[row]]"
+        : [rc] "=l" (rc)
+        : [base] "l" (otp_data_guarded + 0x50), [row] "i" (row)
         );
         return rc;
     }
@@ -141,17 +153,19 @@ int s_varm_api_otp_access(aligned4_uint8_t *buf, uint32_t buf_len, otp_cmd_t cmd
 int s_varm_api_hx_otp_access(aligned4_uint8_t *buf, uint32_t buf_len, otp_cmd_t cmd, hx_xbool secure);
 
 // note this returns a value suitable for writing to OTP_SW_LOCK0 which is assumed to ignore everything other than bits 0-3
-static inline uint32_t call_s_otp_advance_bl_to_s_value(uint32_t ignored, uint32_t page) {
+static inline uint32_t call_s_otp_advance_bl_to_s_value(uint32_t clobber, uint32_t page) {
     register uint r0 asm("r0");
     register uint r1 asm("r1") = page;
     // r4 is trashed, ip is preserved
     pico_default_asm_volatile(
-        "movs %0, %2\n"
+        "movs %[r0], %[clobber]\n" // pre-clobber r0 with supplied value
         "bl s_otp_advance_bl_to_s_value_trash_r4_preserve_ip\n"
-        : "=l" (r0)
-        : "l" (r1), "i"(ignored)
+        : [r0] "=l" (r0), [r1] "+l" (r1)
+        : [clobber] "i" (clobber)
         : "cc", "memory", "r2", "r3", "r4", "lr");
     return r0;
 }
 
+// RP2350-E17 want to check that two rows are consecutive and the first is even
+#define check_ecc_pair(row0, row1) static_assert(!((row0) & 1) && (row1 == row0 + 1), "bad ecc row pair");
 #endif

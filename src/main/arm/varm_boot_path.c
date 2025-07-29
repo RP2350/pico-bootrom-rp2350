@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include "hardware/regs/tbman.h"
 #include "hardware/structs/accessctrl.h"
 #include "hardware/structs/clocks.h"
 #include <hardware/structs/padsbank0.h>
@@ -12,7 +11,6 @@
 #include "hardware/structs/powman.h"
 #include "hardware/structs/psm.h"
 #include "hardware/structs/rosc.h"
-#include "hardware/structs/sio.h"
 #include "hardware/structs/trng.h"
 #include "hardware/structs/watchdog.h"
 #include "hardware/resets.h"
@@ -43,7 +41,7 @@ void __used sonly_varm_crit_core0_boot_path_prolog(void) {
 
     // default to secure until we know otherwise;  note always1 as we had always as a variable below, and
     // we don't want it to live all the way from here
-    typeof(bootram->always ) *always1 = __get_opaque_ptr(&bootram->always);
+    typeof(bootram->always ) *always1 = get_always_ptr();
     always1->secure = hx_xbool_invalid();
 
     // Generally, core 1 is reset whenever core 0 is reset, so right now it is
@@ -78,16 +76,16 @@ void __used sonly_varm_crit_core0_boot_path_prolog(void) {
 #else
     mpu_hw_t *mpu_on_arm;
     pico_default_asm_volatile(
-        "ldr %0, [%[zero],%[_CPACR_OFFSET]]\n"
-        "adds %0, %[REG_DIFF]\n"
-        : "=l" (mpu_on_arm)
+        "ldr %[mpu_on_arm], [%[zero],%[_CPACR_OFFSET]]\n"
+        "adds %[mpu_on_arm], %[REG_DIFF]\n"
+        : [mpu_on_arm] "=l" (mpu_on_arm)
         : [zero] "l" (0), [_CPACR_OFFSET] "i" (CPACR_OFFSET),
           [REG_DIFF] "i" (M33_MPU_TYPE_OFFSET - M33_CPACR_OFFSET)
         : "cc"
         );
 #endif
     branch_under_non_varmulet(not_varm);
-    mpu_on_arm = get_fake_mpu_sau();
+    mpu_on_arm = inline_s_get_fake_mpu_sau();
 not_varm: ;
     // 1: check_rescue
     // ===============
@@ -155,7 +153,7 @@ not_varm: ;
     static_assert(count_of(clocks_hw->wake_en) == 2, "Number of clock enable registers has changed, update varm_boot_path");
 
     // (creating an all-ones mask by smearing sign bit of 0xacce_xxxx)
-    static_assert(ACCESSCTRL_PASSWORD_BITS & (1u << 31));
+    static_assert(ACCESSCTRL_PASSWORD_BITS & (1u << 31), "");
     uint32_t clocks_mask_all = (uint32_t)((int32_t)accessctrl_cfgreset_val >> 31);
     // (we can reuse this pointer in a moment; it's just barely within immediate range of the
     // WAKE_EN registers, even though the base clocks pointer is not)
@@ -176,12 +174,12 @@ not_varm: ;
     uint32_t _tmp_set_to_clr;
     io_rw_32 *resets_set_reg = hw_set_alias(&resets_hw->reset);
     pico_default_asm_volatile (
-        "str %2, [%1]\n"
-        "movs %0, #1\n"
-        "lsls %0, 12\n"
-        "str %2, [%1, %0]\n"
-        : "=&l" (_tmp_set_to_clr)
-        : "l" (resets_set_reg), "l" (trng_sha_reset_mask)
+        "str %[mask], [%[set_reg]]\n"
+        "movs %[tmp], #1\n"
+        "lsls %[tmp], 12\n"
+        "str %[mask], [%[set_reg], %[tmp]]\n"
+        : [tmp] "=&l" (_tmp_set_to_clr)
+        : [set_reg] "l" (resets_set_reg), [mask] "l" (trng_sha_reset_mask)
         : "cc"
     );
 #endif
@@ -197,12 +195,12 @@ not_varm: ;
         // Skip the change if ROSC CTRL is not in its reset state (running, at lowest range):
         uint32_t rosc_ctrl_reset_and_div = __get_opaque_value(0x0fabaa02u);
         if (rosc_hw->ctrl == (rosc_ctrl_reset_and_div >> 4)) {
-            static_assert(CLOCKS_CLK_REF_DIV_BITS == 0x00ff0000u);
+            static_assert(CLOCKS_CLK_REF_DIV_BITS == 0x00ff0000u, "");
             // Increase clk_ref divisor to four (slightly convoluted to save space):
             *clocks_clk_ref_div = rosc_ctrl_reset_and_div << 17;
             (void)*clocks_clk_ref_div;
             // Reduce ROSC divisor to two (making use of bits 31:16 being don't-care)
-            static_assert((ROSC_DIV_BITS & 0xffff0000u) == 0);
+            static_assert((ROSC_DIV_BITS & 0xffff0000u) == 0, "");
             rosc_hw->div = rosc_ctrl_reset_and_div;
         }
     } while (--tries);
@@ -342,13 +340,13 @@ not_varm: ;
     uint32_t random_elements = (uintptr_t)bootram->always.boot_random.e;
     uint32_t sha_sum = (uintptr_t)&sha256->sum[0];
     pico_default_asm_volatile(
-            "ldmia %0!, {r0, r1, r2, r3}\n"
-            "stmia %1!, {r0, r1, r2, r3}\n"
-            "str r3, [%2, #" __XSTRING(ROSC_RANDOM_OFFSET) "]\n"
-            : "+&l" (sha_sum), "+&l" (random_elements)
+            "ldmia %[sha_sum]!, {r0, r1, r2, r3}\n"
+            "stmia %[random_elements]!, {r0, r1, r2, r3}\n"
+            "str r3, [%[rosc_base], #" __XSTRING(ROSC_RANDOM_OFFSET) "]\n"
+            : [sha_sum] "+&l" (sha_sum), [random_elements] "+&l" (random_elements)
             // for some reason the compiler keeps this live in a register instead of rematerialising
             // from the same literal pool entry, but not clear how to stop it from doing that:
-            : "l" (rosc_hw)
+            : [rosc_base] "l" (rosc_hw)
             : "r0", "r1", "r2", "r3"
             );
 #endif
@@ -425,7 +423,9 @@ not_varm: ;
 
     hx_check_step(STEPTAG_STEP5_SAU_SANITY_CHECK);
     // note this is hopefully superfluous due to new rt0.S checks so can be considered for removal if we need space
-#if !NO_EXTRA_SAU_MPU_CHECKS
+//#define SKIP_SAU_MPU_CHECK !NO_EXTRA_SAU_MPU_CHECKS
+#define SKIP_SAU_MPU_CHECK 1
+#if !SKIP_SAU_MPU_CHECK
     {
         register uint ttval asm ("r3") = 0x2c70703;
         pico_default_asm_volatile(
@@ -450,7 +450,8 @@ not_varm: ;
         );
     }
 #else
-    hx_check_step(STEPTAG_STEP6_MPU_SANITY_CHECK);
+    // may as well move this down a bit
+    // hx_check_step(STEPTAG_STEP6_MPU_SANITY_CHECK);
 #endif
     debug_label(step6_trng_sha_check);
     // Sanity check: make sure reset was removed on TRNG and SHA-256
@@ -471,7 +472,7 @@ not_varm: ;
 
     static_assert(!(3 & sizeof(bootram->always.zero_init)), "");
     uintptr_t zero_init_ptr = (uintptr_t)struct_member_ptr_shared_base(bootram, always.boot_random, always.zero_init);
-    s_varm_step_safe_crit_mem_erase_by_words_const_size(zero_init_ptr, sizeof(bootram->always.zero_init), true);
+    call_s_varm_step_safe_crit_mem_erase_by_words_const_size(zero_init_ptr, sizeof(bootram->always.zero_init), true);
     static_assert(!(OTP_DATA_CHIPID0_ROW & 1), "");
     static_assert(sizeof(chip_id_t) == 8, "");
     // save the chip id, so we can always return it irrespective of future OTP permissions
@@ -483,10 +484,13 @@ not_varm: ;
 #else
         bootram->always.chip_id = *(const volatile chip_id_t *)(OTP_DATA_BASE + OTP_DATA_CHIPID0_ROW * 2);
 #endif
-    // note that s_varm_step_safe_api_crit_bootrom_state_reset has weird (but simple return code rules) - it returns it's
+    // note that s_varm_step_safe_api_crit_bootrom_state_reset has weird (but simple return code rules) - it returns its
     // own argument unless the global state is reset in which case it returns 1.
     static_assert(BOOTROM_STATE_RESET_GLOBAL_STATE != 1, "");
     hx_assert_equal2i(s_varm_step_safe_api_crit_bootrom_state_reset(BOOTROM_STATE_RESET_GLOBAL_STATE), 1);
+#if SKIP_SAU_MPU_CHECK
+    hx_check_step(STEPTAG_STEP6_MPU_SANITY_CHECK);
+#endif
 
     static_assert(OTP_USR_RESET == 1, ""); // handy as we have the value 1 already
     otp_hw->usr = OTP_USR_RESET;
@@ -507,12 +511,15 @@ not_varm: ;
     hx_assert_bequal_dup(hx_xbool_to_bool(*struct_member_ptr_shared_base(bootram, always.boot_random, always.secure),
                          hx_bit_pattern_xor_secure()), make_hx_bool2(crit_secure1, crit_secure2));
     // reset core 1 if secure boot
-    crit_secure1 <<= 24;
+    uint psm_core1_bit = crit_secure1 << 24;
     static_assert(__builtin_popcount(OTP_CRITICAL_SECURE_BOOT_ENABLE_BITS) == 1, "");
     static_assert(__builtin_popcount(PSM_FRCE_OFF_PROC1_BITS) == 1, "");
     static_assert(PSM_FRCE_OFF_PROC1_BITS == OTP_CRITICAL_SECURE_BOOT_ENABLE_BITS << 24, "");
     io_rw_32 *psm_frce_off_set = (io_rw_32 *)__get_opaque_value(PSM_BASE + REG_ALIAS_SET_BITS + PSM_FRCE_OFF_OFFSET);
-    *psm_frce_off_set = crit_secure1;
+    // what happens if we glitch over this?
+    // - we aren't worried about running secure code in general (since core 1 is already running secure code),
+    // - but would be worried about resetting OTP without resetting core 1 (potentially allow access to secrets), but this is not possible
+    *psm_frce_off_set = psm_core1_bit;
 #if MINI_PRINTF
     s_varm_step_safe_reset_unreset_block_wait_noinline(RESETS_RESET_IO_BANK0_BITS);
     hw_write_masked(&padsbank0_hw->io[46],
@@ -531,12 +538,11 @@ not_varm: ;
                                     CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS << CLOCKS_CLK_PERI_CTRL_AUXSRC_LSB;
     mini_printf_init();
 
+    bool arm = false;
     branch_under_varmulet(is_riscv);
-    printf("ARM8\n");
-    goto is_arm;
+    arm = true;
 is_riscv:
-    printf("RISC-V\n");
-is_arm:
+    printf(arm ? "ARM8\n" : "RISC-V\n");
     printf("BOOTFLAGS: %08x\n", s_varm_step_safe_otp_read_rbit3_guarded(OTP_DATA_BOOT_FLAGS0_ROW));
     printf("PERBOOT RN %08x:%08x:%08x:%08x\n", (int)bootram->always.boot_random.e[0], (int)bootram->always.boot_random.e[1], (int)bootram->always.boot_random.e[2], (int)bootram->always.boot_random.e[3]);
     printf("CHIP_RESET %08x\n", powman_hw->chip_reset);
@@ -559,12 +565,12 @@ is_arm:
 
     debug_label(step7_check_powman_boot);
     hx_check_step(STEPTAG_STEP7_CHECK_POWMAN_BOOT);
-    uint32_t frce_off = psm_hw->frce_off & crit_secure1;
-    hx_assert_equal2i(frce_off, crit_secure1);
-    psm_frce_off_set[(REG_ALIAS_CLR_BITS-REG_ALIAS_SET_BITS)/4] = crit_secure1;
+    uint32_t frce_off = psm_hw->frce_off & psm_core1_bit;
+    hx_assert_equal2i(frce_off, psm_core1_bit);
+    psm_frce_off_set[(REG_ALIAS_CLR_BITS-REG_ALIAS_SET_BITS)/4] = psm_core1_bit;
 
     // note: try_vector initializes bootram->always.boot_type as a side effect
-    sonly_varm_step_safe_crit_try_vector(hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_POWER_SCRATCH_LSB),
+    sonly_varm_step_safe_crit_try_vector(call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_POWER_SCRATCH_LSB),
                                          mpu_on_arm, &powman_hw->boot[0], NULL);
     // s_varm_try_vector sets step 9
     hx_check_step(STEPTAG_STEP9_CLEAR_BOOTDIS);
@@ -572,7 +578,7 @@ is_arm:
     // s_varm_try_vector checks step 8, so we must reset
     hx_set_step(STEPTAG_STEP8_TRY_VECTOR);
     io_rw_32 *scratch2 = __get_opaque_ptr(&watchdog_hw->scratch[2]);
-    sonly_varm_step_safe_crit_try_vector(hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_WATCHDOG_SCRATCH_LSB),
+    sonly_varm_step_safe_crit_try_vector(call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_WATCHDOG_SCRATCH_LSB),
                                          mpu_on_arm,
                                          scratch2 + 2, // vector == &scratch[4]
                                          scratch2);    // params == &scratch[2]
@@ -586,19 +592,21 @@ is_arm:
 
     powman_hw_t *powman = __get_opaque_ptr(powman_hw);
     // Use | rather than || to save a branch (compiles different because loads are volatile)
-    static_assert(POWMAN_BOOTDIS_NOW_BITS == 1);
-    static_assert(OTP_BOOTDIS_NOW_BITS == 1);
-    if ((int32_t)((otp_hw->bootdis | powman->bootdis) << 31) < 0) {
-        // Confirm the vector-to-image flag is not set if boot vectoring is disabled
-        hx_assert_false(gcc_avoid_single_movw_plus_ldr(bootram->pre_boot.boot_to_ram_image));
-    }
+    static_assert(POWMAN_BOOTDIS_NOW_BITS == 1, "");
+    static_assert(OTP_BOOTDIS_NOW_BITS == 1, "");
+//    if ((int32_t)((otp_hw->bootdis | powman->bootdis) << 31) < 0) {
+//        // Confirm the vector-to-image flag is not set if boot vectoring is disabled
+//        // note: this check is perhaps superfluous now given how much we check bootdis in try_vector
+//        //       however keeping it for now, but not hardening it any further
+//        hx_assert_false(gcc_avoid_single_movw_plus_ldr(bootram->pre_boot.boot_to_ram_image));
+//    }
     // Unconditionally clear, since clearing when not set is idempotent
     // opaque value to avoid getting too many literals of the form 5afexxxx
     uint32_t powman_password = __get_opaque_value(POWMAN_PASSWORD_BITS);
     // Note + rather than | (v6-M has an encoding for rd = rn + uimm3)
     uint32_t bootdis_clear_bits = powman_password + OTP_BOOTDIS_NOW_BITS;
-    static_assert(!(OTP_BOOTDIS_BITS & POWMAN_PASSWORD_BITS));
-    static_assert(OTP_BOOTDIS_NOW_BITS == POWMAN_BOOTDIS_NOW_BITS);
+    static_assert(!(OTP_BOOTDIS_BITS & POWMAN_PASSWORD_BITS), "");
+    static_assert(OTP_BOOTDIS_NOW_BITS == POWMAN_BOOTDIS_NOW_BITS, "");
     otp_hw->bootdis = bootdis_clear_bits;
     powman->bootdis = bootdis_clear_bits;
 
@@ -622,8 +630,8 @@ is_arm:
     // First clear all pwrup req enables, because a hardware-sourced request
     // will block a software-sourced request
     static_assert(count_of(powman_hw->pwrup) == 4, "");
-    static_assert(POWMAN_PWRUP0_OFFSET == POWMAN_TIMER_OFFSET + 4);
-    static_assert(POWMAN_PWRUP3_OFFSET == POWMAN_PWRUP0_OFFSET + (3 * 4));
+    static_assert(POWMAN_PWRUP0_OFFSET == POWMAN_TIMER_OFFSET + 4, "");
+    static_assert(POWMAN_PWRUP3_OFFSET == POWMAN_PWRUP0_OFFSET + (3 * 4), "");
     uint32_t pwrup_clear_bits = __get_opaque_value(powman_password | POWMAN_PWRUP0_ENABLE_BITS);
     powman_timer_clr[1] = pwrup_clear_bits;
     powman_timer_clr[2] = pwrup_clear_bits;
@@ -631,7 +639,7 @@ is_arm:
     powman_timer_clr[4] = pwrup_clear_bits;
 
     // (size: this yields a single subs rather than movs; ors)
-    static_assert(POWMAN_PWRUP0_ENABLE_BITS - 32 == POWMAN_TIMER_PWRUP_ON_ALARM_BITS);
+    static_assert(POWMAN_PWRUP0_ENABLE_BITS - 32 == POWMAN_TIMER_PWRUP_ON_ALARM_BITS, "");
     powman_timer_clr[0] = pwrup_clear_bits - 32;
 
     // If anything is already in progress, wait for it to complete. Note, we only need to check
@@ -679,7 +687,7 @@ is_arm:
     // Note __get_opaque_ptr here is to avoid extraneous 32-bit constants for loop bounds
     io_rw_32 *padsbank0_io_set = __get_opaque_ptr(hw_set_alias(&padsbank0_hw->io[0]));
     // avoid a movw -- APB addresses start with 0b01000000000x and we want 0x100
-    static_assert((PADS_BANK0_BASE >> 22) == PADS_BANK0_GPIO0_ISO_BITS);
+    static_assert((PADS_BANK0_BASE >> 22) == PADS_BANK0_GPIO0_ISO_BITS, "");
     uint32_t iso_bits = (uintptr_t)padsbank0_io_set >> 22;
     for (uint i = 0; i < NUM_BANK0_GPIOS; ++i) {
         padsbank0_io_set[i] = iso_bits;
@@ -707,13 +715,16 @@ is_arm:
     }
 
     // mark the resident partition table as invalid. now we're either entering IMAGE_DEF or NSBOOT
-    typeof(bootram->always ) *always2 = __get_opaque_ptr(&bootram->always);
+    typeof(bootram->always ) *always2 = get_always_ptr();
     always2->partition_table.counts_and_load_flag = 0;
 
     // Load flash device info from OTP if it's valid, otherwise use default from flash header
     always2->zero_init.flash_devinfo = FLASH_DEFAULT_DEVINFO;
-    if (hx_is_true(hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_FLASH_DEVINFO_ENABLE_LSB))) {
-        always2->zero_init.flash_devinfo = (uint16_t)inline_s_otp_read_ecc_guarded(OTP_DATA_FLASH_DEVINFO_ROW);
+    if (hx_is_true(call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_FLASH_DEVINFO_ENABLE_LSB))) {
+        check_ecc_pair(OTP_DATA_FLASH_DEVINFO_ROW, OTP_DATA_FLASH_PARTITION_SLOT_SIZE_ROW);
+        // RP2350-E17; not using guarded read as sibling ECC row is enabled by a different bit
+        //always2->zero_init.flash_devinfo = (uint16_t)inline_s_otp_read_ecc_guarded(OTP_DATA_FLASH_DEVINFO_ROW);
+        always2->zero_init.flash_devinfo = (uint16_t)inline_s_otp_read_ecc(OTP_DATA_FLASH_DEVINFO_ROW);
     }
 
     // 12: boot path selection
@@ -728,10 +739,15 @@ is_arm:
 #if !ASM_SIZE_HACKS
     *clear_resets_reg = RESETS_RESET_USBCTRL_BITS;
 #else
-    static_assert((((RESETS_BASE + REG_ALIAS_CLR_BITS) << 16) & RESETS_RESET_BITS) == RESETS_RESET_USBCTRL_BITS);
+    static_assert((((RESETS_BASE + REG_ALIAS_CLR_BITS) << 16) & RESETS_RESET_BITS) == RESETS_RESET_USBCTRL_BITS, "");
     uint32_t usb_reset_bits;
     // asm required to stop the compiler constant-folding back to a larger sequence.
-    pico_default_asm ("lsls %0, %1, #16" : "=&l" (usb_reset_bits) : "l" ((uintptr_t)clear_resets_reg) : "cc");
+    pico_default_asm (
+        "lsls %[usb_reset_bits], %[clear_resets_reg], #16"
+        : [usb_reset_bits] "=&l" (usb_reset_bits)
+        : [clear_resets_reg] "l" ((uintptr_t)clear_resets_reg)
+        : "cc"
+    );
     *clear_resets_reg = usb_reset_bits;
 #endif
     (void) *clear_resets_reg;
@@ -741,7 +757,7 @@ is_arm:
     static_assert(sizeof(core0_boot_usbram_workspace) % 4 == 0, "");
     // Note this mem erase is also providing ~33 us of delay (at fast corner) between
     // resetting the pads registers, and sampling the CSn/SD1 boot straps.
-    s_varm_step_safe_crit_mem_erase_by_words_const_size(((uintptr_t)&core0_boot_usbram_workspace), sizeof(core0_boot_usbram_workspace), true);
+    call_s_varm_step_safe_crit_mem_erase_by_words_const_size(((uintptr_t)&core0_boot_usbram_workspace), sizeof(core0_boot_usbram_workspace), true);
 
     // At this point, if this is an emulated context (on RISC-V hardware), we relocate the emulated
     // register file from bottom of Arm stack redzone in bootram into a dedicated space in USB RAM.
@@ -750,11 +766,13 @@ is_arm:
 
     const uint varm_relocate_opcode = HINT_OPCODE_BASE + 16 * HINT_RELOCATE_VARM_REGISTERS;
     pico_default_asm_volatile (
-        "movs r0, %1\n"
-        "subs r0, %2\n"
-        ".hword %c0\n"
+        "movs r0, %[workspace_base]\n"
+        "subs r0, %[state_size]\n"
+        ".hword %c[opcode]\n"
         :
-        : "i" (varm_relocate_opcode), "l" ((uintptr_t)&core0_boot_usbram_workspace), "i" (VARMULET_CPU_STATE_SIZE)
+        : [opcode]         "i" (varm_relocate_opcode),
+          [workspace_base] "l" ((uintptr_t)&core0_boot_usbram_workspace),
+          [state_size]     "i" (VARMULET_CPU_STATE_SIZE)
         : "r0", "cc"
     );
 
@@ -786,11 +804,17 @@ is_arm:
         "adcs %[sum_sd1], %[i]\n"
         "subs %[i], #1\n"
         "bne 1b\n"
+        // check that this is core 0
+        "ldr r0, [%[sio_addr], %[_SIO_CPUID_OFFSET]]\n"
+        ".cpu cortex-m33\n"
+        "mcrr2 p7, #7, r0, %[i], c0\n" // rcp_iequal_no_delay
+        ".cpu cortex-m23\n"
         : [sum_cs] "+l" (sum_cs), [sum_sd1] "+l" (sum_sd1), [i] "+l" (i)
         : [sio_addr] "l" (SIO_BASE),
           [_SIO_GPIO_HI_IN_OFFSET] "i" (SIO_GPIO_HI_IN_OFFSET),
           [_SIO_GPIO_HI_IN_QSPI_CSN_LSB] "i" (SIO_GPIO_HI_IN_QSPI_CSN_LSB),
           [_SIO_GPIO_HI_IN_QSPI_SD_LSB] "i" (SIO_GPIO_HI_IN_QSPI_SD_LSB),
+          [_SIO_CPUID_OFFSET] "i" (SIO_CPUID_OFFSET),
           [delay_cycles] "i" (1 * ROSC_MHZ_MAX)
         : "r0", "cc", "lr"
         );
@@ -809,18 +833,19 @@ is_arm:
         bootram->always.recent_boot.hword = (uint8_t)BOOT_PARTITION_NONE;
         bootram->always.boot_diagnostic = 0;
 #else
-        uint64_t *ptr = __get_opaque_ptr(&bootram->always.boot_type_and_diagnostics);
+        uint64_t *ptr = (uint64_t *)get_always_boot_type_and_diagnostics_ptr();
         uint64_t saved_boot_type_and_diagnostics = *ptr;
         static_assert(offsetof(bootram_t, always.recent_boot.hword) ==
-                      offsetof(bootram_t, always.boot_type_and_diagnostics) + 2);
+                      offsetof(bootram_t, always.boot_type_and_diagnostics) + 2, "");
         ((uint16_t*)ptr)[1] = (uint8_t)BOOT_PARTITION_NONE;
         static_assert(offsetof(bootram_t, always.boot_diagnostic) ==
-                      offsetof(bootram_t, always.boot_type_and_diagnostics) + 4);
+                      offsetof(bootram_t, always.boot_type_and_diagnostics) + 4, "");
         ((uint32_t*)ptr)[1] = 0;
 #endif
-        s_varm_crit_init_boot_scan_context(&core0_boot_usbram_workspace,
-                                           mpu_on_arm,
-                                           true); // executable only
+        // note the workspace was zeroed above
+        hx_check_bool(s_varm_crit_init_boot_scan_context(&core0_boot_usbram_workspace,
+                                                         mpu_on_arm,
+                                                         true)); // executable only
         // used if we aren't doing flash boot
         boot_scan_context_t *ctx = &core0_boot_usbram_workspace.ctx_holder.ctx;
         ctx->booting = hx_true();
@@ -881,10 +906,11 @@ is_arm:
                 puts("BOOTSEL not pressed");
                 // USB boot API is not available in regular boot
                 hx_assert_false(*struct_member_ptr_shared_base(bootram, pre_boot.boot_to_ram_image, pre_boot.enter_nsboot));
-                hx_bool disable_otp = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_OTP_BOOT_LSB);
+                hx_bool disable_otp = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_OTP_BOOT_LSB);
                 if (hx_is_false(disable_otp)) {
-                    hx_bool enable_otp = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_ENABLE_OTP_BOOT_LSB);
+                    hx_bool enable_otp = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_ENABLE_OTP_BOOT_LSB);
                     if (hx_is_true(enable_otp)) {
+                        hx_assert_false(disable_otp);
                         s_varm_crit_ram_trash_try_otp_boot(mpu_on_arm, ctx);
                     } else {
                         hx_assert_false(enable_otp);
@@ -893,7 +919,7 @@ is_arm:
                     hx_assert_true(disable_otp);
                     puts("boot from otp is disabled; skipping");
                 }
-                hx_bool disable_flash = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_FLASH_BOOT_LSB);
+                hx_bool disable_flash = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_FLASH_BOOT_LSB);
                 if (hx_is_false(disable_flash)) {
                     debug_label(stepx_flash_boot);
                     hx_assert_false(disable_flash);
@@ -909,11 +935,11 @@ is_arm:
                 bootram->always.boot_type_and_diagnostics = saved_boot_type_and_diagnostics;
                 bootram->always.boot_type = BOOT_TYPE_BOOTSEL;
 #else
-                uint64_t *ptr = __get_opaque_ptr(&bootram->always.boot_type_and_diagnostics);
-                *ptr = saved_boot_type_and_diagnostics;
+                uint64_t *ptr64 = __get_opaque_ptr(&bootram->always.boot_type_and_diagnostics);
+                *ptr64 = saved_boot_type_and_diagnostics;
                 static_assert(offsetof(bootram_t, always.boot_type) ==
-                              offsetof(bootram_t, always.boot_type_and_diagnostics) + 1);
-                ((uint8_t*)ptr)[1] = (uint8_t)BOOT_TYPE_BOOTSEL;
+                              offsetof(bootram_t, always.boot_type_and_diagnostics) + 1, "");
+                ((uint8_t*)ptr64)[1] = (uint8_t)BOOT_TYPE_BOOTSEL;
 #endif
             }
         }
@@ -930,15 +956,15 @@ is_arm:
     // make sure compiler doesn't elide init
     pico_default_asm_volatile("movs %0, #0" : "=r" (bootsel_disabled) : : "cc");
     if (bootsel_serialmode == BOOTSEL_MODE_USB) {
-        hx_bool disable_usb_msd      = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_MSD_IFC_LSB);
-        hx_bool disable_usb_picoboot = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_PICOBOOT_IFC_LSB);
+        hx_bool disable_usb_msd      = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_MSD_IFC_LSB);
+        hx_bool disable_usb_picoboot = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_PICOBOOT_IFC_LSB);
         printf("disable USB %d PICOBOOT %d\n", hx_is_true(disable_usb_msd), hx_is_true(disable_usb_picoboot));
         bootsel_disabled = hx_and_checked(disable_usb_msd, disable_usb_picoboot);
         bootsel_flags = (uint32_t)(hx_is_true(disable_usb_msd) | (hx_is_true(disable_usb_picoboot) << 1u));
         hx_assert_equal2i(__get_opaque_value(bootsel_serialmode), BOOTSEL_MODE_USB);
     } else {
         // Assumedly, bootsel_serialmode == BOOTSEL_MODE_UART
-        bootsel_disabled = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_UART_BOOT_LSB);
+        bootsel_disabled = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_UART_BOOT_LSB);
         printf("disable UART %d\n", hx_is_true(bootsel_disabled));
         hx_assert_equal2i(bootsel_serialmode, BOOTSEL_MODE_UART);
     }
@@ -1167,7 +1193,7 @@ static __noinline void sonly_varm_step_safe_crit_try_vector(hx_bool disabled, mp
                     pre_boot->flash_update_boot_window_base = params[0];
                     printf("VECTOR has FLASH_UPDATE window base of %08x\n", pre_boot->flash_update_boot_window_base);
                 } else if (boot_type == BOOT_TYPE_RAM_IMAGE && hx_is_false(bootdis_set)) {
-                    hx_bool disable_ram = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_SRAM_WINDOW_BOOT_LSB);
+                    hx_bool disable_ram = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_SRAM_WINDOW_BOOT_LSB);
                     printf("VECTOR has RAM boot into window range %08x->%08x\n", params[0], params[1]);
                     if (hx_is_false(disable_ram)) {
                         hx_assert_false(bootdis_set);
@@ -1185,7 +1211,7 @@ static __noinline void sonly_varm_step_safe_crit_try_vector(hx_bool disabled, mp
             set_boot_once_bit(BOOT_ONCE_NSBOOT_API_DISABLED);
             // re-enable default access control
             mpu_save_state_t save_state;
-            s_save_clear_and_disable_mpu(mpu_on_arm, &save_state); // re-enable rwx
+            inline_s_save_clear_and_disable_mpu(mpu_on_arm, &save_state); // save and clear MPU (RLAR and enable)
             hx_assert_false(disabled);
             // Hoist the check_step in this case, to make sure it is before the call
             mini_printf_flush();
@@ -1200,9 +1226,10 @@ static __noinline void sonly_varm_step_safe_crit_try_vector(hx_bool disabled, mp
             canary_set_step(STEPTAG_S_VARM_SECURE_CALL);
             //hx_assert_equal2i(vector->pc_mod ^ -magic, pc);
             hx_assert_false(bootdis_set);
-            varm_to_s_native_secure_call_pc_sp(pc, nv_vector->sp, pc_mod, neg_magic);
             // note if this returns, it returns with STEPTAG_STEP7_TRY_VECTOR as the count again
-            s_restore_and_enable_mpu(mpu_on_arm, &save_state);
+            varm_to_s_native_secure_call_pc_sp(pc, nv_vector->sp, pc_mod, neg_magic);
+            // restore protective MPU
+            inline_s_restore_and_enable_mpu(mpu_on_arm, &save_state);
         }
     }
     hx_check_step(STEPTAG_STEP8_TRY_VECTOR);
@@ -1223,6 +1250,8 @@ void s_varm_crit_ram_trash_try_otp_boot(mpu_hw_t *mpu_on_arm, boot_scan_context_
     debug_label(stepx_otp_boot);
     uint32_t dst;
     if (!(OTP_DATA_OTPBOOT_DST0_ROW & 1) && OTP_DATA_OTPBOOT_DST0_ROW + 1 == OTP_DATA_OTPBOOT_DST1_ROW) {
+        // RP2350-E17; guarded reads here are fine as we're reading two sibling rows
+        static_assert(!(OTP_DATA_OTPBOOT_DST0_ROW & 1), "");
         dst = inline_s_otp_read_ecc2_guarded(OTP_DATA_OTPBOOT_DST0_ROW);
     } else {
 #if !(!(OTP_DATA_OTPBOOT_DST0_ROW & 1) && OTP_DATA_OTPBOOT_DST0_ROW + 1 == OTP_DATA_OTPBOOT_DST1_ROW)
@@ -1234,6 +1263,8 @@ void s_varm_crit_ram_trash_try_otp_boot(mpu_hw_t *mpu_on_arm, boot_scan_context_
         );
 #endif
     }
+    check_ecc_pair(OTP_DATA_OTPBOOT_SRC_ROW, OTP_DATA_OTPBOOT_LEN_ROW);
+    // RP2350-E17; guarded reads here are fine as sibling rows are enabled by the same bit
     uint32_t src_row = inline_s_otp_read_ecc_guarded(OTP_DATA_OTPBOOT_SRC_ROW);
     uint32_t len_rows = inline_s_otp_read_ecc_guarded(OTP_DATA_OTPBOOT_LEN_ROW);
 
@@ -1251,13 +1282,7 @@ void s_varm_crit_ram_trash_try_otp_boot(mpu_hw_t *mpu_on_arm, boot_scan_context_
 
     volatile uint32_t *dstp = (volatile uint32_t*)dst;
     io_ro_32 *srcp = (io_ro_32*)((const volatile void*)otp_data_guarded + 2 * src_row);
-//    inline_s_set_ram_rw_xn(mpu_on_arm);
-    // --- begin expansion
-    // 0u for M33_MPU_RBAR_AP_LSB is r/w privileged only
-    uint32_t rbar_ram_rw_xn = SRAM_BASE | (0u << M33_MPU_RBAR_AP_LSB) | (M33_MPU_RBAR_XN_BITS);
-    static_assert(BOOTROM_MPU_REGION_RAM == 1, "");
-    mpu_on_arm->rbar_a1 = rbar_ram_rw_xn;
-    // --- end expansion
+    inline_s_set_ram_rw_xn(mpu_on_arm);
 
 #if !ASM_SIZE_HACKS
     for (uint i = 0; i < len_rows; i += 2) {
@@ -1269,26 +1294,18 @@ void s_varm_crit_ram_trash_try_otp_boot(mpu_hw_t *mpu_on_arm, boot_scan_context_
     pico_default_asm_volatile(
         "b 2f\n"
     "1:\n"
-        "ldmia %0!, {%2}\n"
-        "stmia %1!, {%2}\n"
+        "ldmia %[srcp]!, {%[tmp]}\n"
+        "stmia %[dstp]!, {%[tmp]}\n"
     "2:\n"
-        "cmp %0, %3\n"
+        "cmp %[srcp], %[bound]\n"
         "blo 1b\n"
-        : "+l" (srcp), "+l" (dstp), "=&l" (garbage)
-        : "r" (srcp + (len_rows >> 1))
+        : [srcp] "+l" (srcp), [dstp] "+l" (dstp), [tmp] "=&l" (garbage)
+        : [bound] "r" (srcp + (len_rows >> 1))
         : "cc"
     );
 #endif
 
-    // inline_s_set_ram_ro_xn(mpu_on_arm);
-    // --- begin expansion
-    // skip rnr write as it is unmodified
-    // mpu_on_arm->rnr = 0;
-    // 2u for M33_MPU_RBAR_AP_LSB is r/o privileged only
-    uint32_t rbar_ram_ro_xn = __get_opaque_value(rbar_ram_rw_xn) + (2u << M33_MPU_RBAR_AP_LSB);
-    static_assert(BOOTROM_MPU_REGION_RAM == 1, "");
-    mpu_on_arm->rbar_a1 = rbar_ram_ro_xn;
-    // --- end expansion
+    inline_s_set_ram_ro_xn(mpu_on_arm);
 
     // We re-use the RAM boot path -- requires signature if secure boot is enabled, etc,
     // which is why we aren't too fussy at this point about validating what we just copied.
@@ -1306,21 +1323,20 @@ static __force_inline uint8_t inline_s_get_current_cpu_type(void) {
     return (archsel_bits >> get_core_num()) & 1;
 }
 
-void s_varm_crit_init_boot_scan_context(scan_workarea_t *scan_workarea,
+hx_bool s_varm_crit_init_boot_scan_context(scan_workarea_t *scan_workarea,
                                         mpu_hw_t *mpu_on_arm,
                                         bool executable_image_def_only) {
     canary_entry(S_VARM_CRIT_INIT_BOOT_SCAN_CONTEXT);
     boot_scan_context_t *ctx = &scan_workarea->ctx_holder.ctx;
+    // extra check that the memory is zeroed out
+    call_s_varm_step_safe_crit_mem_erase_by_words_const_size((uintptr_t)ctx, sizeof(boot_scan_context_t), false);
     ctx->mpu_on_arm = mpu_on_arm;
-    ctx->signed_partition_table_required = hx_and_checked(
-        hx_xbool_to_bool(gcc_avoid_single_movw_plus_ldr(bootram->always.secure), hx_bit_pattern_xor_secure()),
-        hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_SECURE_PARTITION_TABLE_LSB));
-    ctx->hashed_partition_table_required = hx_step_safe_get_boot_flagx(OTP_DATA_BOOT_FLAGS0_HASHED_PARTITION_TABLE_LSB);
-    ctx->rollback_version_required = hx_step_safe_get_boot_flagx(OTP_DATA_BOOT_FLAGS0_ROLLBACK_REQUIRED_LSB);
+    ctx->hashed_partition_table_required = call_hx_step_safe_get_boot_flagx(OTP_DATA_BOOT_FLAGS0_HASHED_PARTITION_TABLE_LSB);
+    ctx->rollback_version_required = call_hx_step_safe_get_boot_flagx(OTP_DATA_BOOT_FLAGS0_ROLLBACK_REQUIRED_LSB);
     ctx->executable_image_def_only = executable_image_def_only;
     ctx->boot_cpu = inline_s_get_current_cpu_type();
     ctx->scan_workarea = scan_workarea;
-    ctx->dont_scan_for_partition_tables = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_SINGLE_FLASH_BINARY_LSB);
+    ctx->dont_scan_for_partition_tables = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_SINGLE_FLASH_BINARY_LSB);
 #if FEATURE_EXEC2
     ctx->exec2 = hx_false();
 #endif
@@ -1337,5 +1353,9 @@ void s_varm_crit_init_boot_scan_context(scan_workarea_t *scan_workarea,
     //    ctx->allow_varmulet =
     //    ctx->flash_mode =
     //    ctx->flash_clkdiv =
-    canary_exit_void(S_VARM_CRIT_INIT_BOOT_SCAN_CONTEXT);
+    hx_bool rc = hx_and_checked(
+            hx_xbool_to_bool(gcc_avoid_single_movw_plus_ldr(bootram->always.secure), hx_bit_pattern_xor_secure()),
+            call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_SECURE_PARTITION_TABLE_LSB));
+    ctx->signed_partition_table_required = rc;
+    canary_exit_return(S_VARM_CRIT_INIT_BOOT_SCAN_CONTEXT, rc);
 }

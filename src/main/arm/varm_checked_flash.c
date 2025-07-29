@@ -93,7 +93,7 @@ static int __noinline s_varm_checked_flash_op_notranslate(cflash_flags_t flags, 
             seclevel - CFLASH_SECLEVEL_VALUE_SECURE
     ));
 
-    if (!s_varm_flashperm_storage_addr_span_has_permissions(addr, size_bytes, permission_mask)) {
+    if (!inline_s_varm_flashperm_storage_addr_span_has_permissions(addr, size_bytes, permission_mask)) {
         printf("OP %d %p + %08x permission failure\n", op, addr, size_bytes);
         rc = BOOTROM_ERROR_NOT_PERMITTED;
         goto op_notranslate_done;
@@ -120,7 +120,7 @@ static int __noinline s_varm_checked_flash_op_notranslate(cflash_flags_t flags, 
             // D8h block erase command is used only if it is marked as supported by flash device info
             // read from OTP during boot, or later set by Secure code writing to bootram cached device info
             s_varm_api_flash_range_erase(addr - XIP_BASE, size_bytes,
-                                         s_varm_flash_devinfo_get_d8h_supported() ? 1u << 16 : -1u, 0xd8);
+                                         inline_s_varm_flash_devinfo_get_d8h_supported() ? 1u << 16 : -1u, 0xd8);
             break;
         case CFLASH_OP_VALUE_READ:
             s_varm_crit_flash_read_data(buf, addr - XIP_BASE, size_bytes);

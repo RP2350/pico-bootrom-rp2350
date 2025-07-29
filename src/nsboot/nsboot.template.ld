@@ -61,6 +61,7 @@ SECTIONS {
     .bss : {
         __bss_begin = .;
         *(.bss.first)
+        KEEP(*(.bss.second)) /* we need _msc */
         *(SORT_BY_ALIGNMENT(SORT_BY_NAME(.bss*)))
         *(COMMON)
     } >USBRAM
@@ -78,5 +79,6 @@ SECTIONS {
     ASSERT(__irq14_vector - ((${NSBOOT_START} + ${NSBOOT_VTOR_OFFSET})&~0x7f) == (16 + 14) * 4, "USB irq vector entry is in the wrong place")
     ASSERT(__usb_ram_end - __usb_ram_begin <= LENGTH(USBRAM), "USB RAM overflow")
     ASSERT(__usb_ram_end - __usb_ram_begin == LENGTH(USBRAM), "Increase stack space to fill gap")
+    ASSERT(_msc == ${NSBOOT_MSC_START}, "_msc not where expected")
     INCLUDE "${P16_ASSERTS_LINKER_SCRIPT}"
 }

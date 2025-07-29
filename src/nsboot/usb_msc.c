@@ -14,6 +14,7 @@
 #include "nsboot_arch_adapter.h"
 #include "scsi_ir.h"
 #include "hardware/regs/otp_data.h"
+#include "bootrom_layout.h"
 #define INCLUDE_scsi_ir_z
 #include "generated.h"
 
@@ -69,19 +70,32 @@ struct usb_endpoint msc_endpoints[2];
 #define msc_out msc_endpoints[1]
 
 // mutable state; gathered together
-static struct {
+struct msc {
     struct msc_state state;
     uint32_t async_token;
     struct usb_transfer cmd_transfer;
     struct usb_transfer cmd_response_transfer;
     __attribute__((aligned(4))) uint8_t sector_buf[SECTOR_SIZE];
-} _msc;
+};
 
-#define _msc_cmd_transfer (_msc.cmd_transfer)
-#define _msc_cmd_response_transfer (_msc.cmd_response_transfer)
-#define _msc_state (_msc.state)
-#define _msc_async_token (_msc.async_token)
-#define _sector_buf (_msc.sector_buf)
+__used __attribute__((section(".bss.second"))) struct msc _msc;
+
+#if !ASM_SIZE_HACKS
+#define p_msc (&_msc)
+#else
+// derefencing an 8 bit pointer is cheaper that loading from the ltieral pool - this pointer is reference a lot
+// so this saves quitea bit of space
+static __force_inline struct msc *get_p_msc(void) {
+    return *(struct msc **)MSC_POINTER_OFFSET;
+}
+#define p_msc get_p_msc()
+#endif
+
+#define _msc_cmd_transfer (p_msc->cmd_transfer)
+#define _msc_cmd_response_transfer (p_msc->cmd_response_transfer)
+#define _msc_state (p_msc->state)
+#define _msc_async_token (p_msc->async_token)
+#define _sector_buf (p_msc->sector_buf)
 
 #if !ASM_SIZE_HACKS
 void tf_wait_command(__unused struct usb_endpoint *ep, __unused struct usb_transfer *transfer) {
@@ -98,10 +112,10 @@ void tf_wait_command(__unused struct usb_endpoint *ep, __unused struct usb_trans
 #else
 void __attribute__((naked)) tf_wait_command(__unused struct usb_endpoint *ep, __unused struct usb_transfer *transfer) {
     pico_default_asm_volatile(
-            "adds r0, %0\n"
+            "adds r0, %[endpoint_size]\n"
             "b usb_start_default_transfer_if_not_already_running_or_halted\n"
             :
-            : "i" (sizeof(struct usb_endpoint))
+            : [endpoint_size] "i" (sizeof(struct usb_endpoint))
             );
 }
 #endif

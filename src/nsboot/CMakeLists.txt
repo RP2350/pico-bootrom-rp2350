@@ -165,6 +165,10 @@ if (NSBOOT_BUILD)
     target_compile_definitions(nsboot_raw PRIVATE
             NSBOOT_APP=1
             )
+    # only way to suppress warning about derefencing the MSC_POINTER
+    target_compile_options(nsboot_raw PRIVATE
+            --param=min-pagesize=${MSC_POINTER_OFFSET}
+    )
     if (NSBOOT_ASSERT_DEFAULT_ENABLE)
         target_compile_definitions(nsboot_raw PRIVATE BOOTROM_ASSERT_DEFAULT_ENABLE=1)
     endif()

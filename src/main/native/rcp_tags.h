@@ -161,11 +161,12 @@
 #define CTAG_S_VARM_STEP_SAFE_HX2_GET_BOOT_FLAG_IMPL                 0xbd
 #define CTAG_SB_SW_VERIFY_CONTINUE_AND_FINISH                        0x40
 #define CTAG_S_VARM_MAKE_HX2_BOOL_IMPL                               0x56
-#define CTAG_S_SAVE_CLEAR_AND_DISABLE_MPU                            0xbe
+#define CTAG_S_SWAP_MPU_STATE                                        0xbe
 #define CTAG_SB_FE_HARD                                              0x4b
 #define CTAG_S_VARM_CHECK_SCAN_WORK_AREA_AND_CHECK_SHA_LOCK          0x8c
 #define CTAG_ARM8_MEMCPY                                             0x79
 #define CTAG_SG_TABLE_ENTY                                           0xb9
+#define CTAG_SIG_DISRUPTER                                           0x7d
 #if defined(__riscv) || !defined(FEATURE_CANARIES)
 #define canary_entry(tag) ((void)0)
 #define canary_entry_reg(reg, tag) ((void)0)

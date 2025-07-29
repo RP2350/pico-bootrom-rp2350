@@ -23,7 +23,7 @@
 void s_varm_crit_buy_erase_other_version(__unused bool explicit) {
     canary_entry(S_VARM_CRIT_BUY_ERASE_OTHER_VERSION);
 
-    typeof(bootram->always) *always = __get_opaque_ptr(&bootram->always);
+    typeof(bootram->always) *always = get_always_ptr();
     if (always->zero_init.version_downgrade_erase_flash_addr) {
         printf("Erasing flash sector at address %08x due to %s buy\n", always->zero_init.version_downgrade_erase_flash_addr, explicit ? "explicit" : "implicit");
         s_varm_flash_sector_erase(always->zero_init.version_downgrade_erase_flash_addr - XIP_BASE);
@@ -66,15 +66,22 @@ int s_varm_crit_redo_last_reboot_trash_r4_r5(uint32_t flags) {
 static_assert(sizeof(bootram->always.boot_type)==1, "");
 static_assert(BOOTROM_SHORT_REBOOT_MS == 1, "");
 static_assert(REBOOT2_FLAG_NO_RETURN_ON_SUCCESS == (BOOTROM_SHORT_REBOOT_MS << 8), "");
+static_assert((offsetof(bootram_t, always.zero_init.reboot_params) & 8) == 0, ""); // useful to hardening of the assembly
 int __attribute__((naked)) s_varm_crit_redo_last_reboot_trash_r4_r5(__unused uint32_t flags) {
     pico_default_asm_volatile(
             "movs r1, #1\n"
             "lsls r2, r1, #8\n"
             "orrs r0, r2\n"
+            // we are never legitimately called with bit 3 set since this API is only used to reboot
+            // during image launch, so clear it here to be sure - we still check again below
+            "movs r5, #8\n"
+            "bics r0, r5\n"
             "ldr r4, =%[reboot_params]\n"
             "ldmia r4!, {r2, r3, r5}\n" // note dummy read of r5 to allow an < 16 offset for the byte load
-            "ldrb r4, [r4, %[boot_type_minus_reboot_params_minus_12]]\n"
-            "orrs r0, r4\n"
+            // note r5 is tbyb_flag_flash_addr, so is likely 0 in most cases, so lets use that over r4 which definitely has bit 3 set
+            // (which is also good for the tst below)
+            "ldrb r5, [r4, %[boot_type_minus_reboot_params_minus_12]]\n"
+            "orrs r0, r5\n"
             // we want to avoid PC_SP as r0 which has bit 3 set
             "movs r4, #8\n"
             "tst r0, r4\n"
@@ -83,15 +90,14 @@ int __attribute__((naked)) s_varm_crit_redo_last_reboot_trash_r4_r5(__unused uin
             "beq.n s_varm_api_reboot\n"
             :
             : [reboot_params] "i" (bootram->always.zero_init.reboot_params.e),
-              [boot_type_minus_reboot_params_minus_12] "i" (offsetof(bootram_t, always.boot_type) - offsetof(bootram_t, always.zero_init.reboot_params) - 12),
-              [short_reboot_ms] "i" (BOOTROM_SHORT_REBOOT_MS),
-              [reboot2_flag_no_return_on_success] "i" (REBOOT2_FLAG_NO_RETURN_ON_SUCCESS)
+              [boot_type_minus_reboot_params_minus_12] "i" (offsetof(bootram_t, always.boot_type) - offsetof(bootram_t, always.zero_init.reboot_params) - 12)
+            : "cc", "memory"
             );
     rcp_panic();
 }
 #endif
 
-__force_inline int s_varm_crit_redo_last_reboot(uint32_t flags) {
+__force_inline int call_s_varm_crit_redo_last_reboot(uint32_t flags) {
     register int r0 asm ("r0") = (int)flags;
     pico_default_asm_volatile (
             "bl s_varm_crit_redo_last_reboot_trash_r4_r5\n"
@@ -105,7 +111,7 @@ __force_inline int s_varm_crit_redo_last_reboot(uint32_t flags) {
 int s_varm_crit_buy_update_otp_version(__unused bool explicit) {
     canary_entry(S_VARM_CRIT_BUY_UPDATE_OTP_VERSION);
     int rc = BOOTROM_OK;
-    typeof(bootram->always) *always = __get_opaque_ptr(&bootram->always);
+    typeof(bootram->always) *always = get_always_ptr();
     if (always->zero_init.pending_rollback_version_otp_info.row) {
         printf("Applying OTP version (row %04x bit %d) due to %s buy\n", always->zero_init.pending_rollback_version_otp_info.row, always->zero_init.pending_rollback_version_otp_info.bit,
                explicit ? "explicit" : "implicit");
@@ -128,7 +134,7 @@ int s_varm_crit_buy_update_otp_version(__unused bool explicit) {
             }
             if (always->zero_init.pending_rollback_version_otp_info.reboot) {
                 printf("REBOOTING because we aren't done writing rollback rows!");
-                rc = s_varm_crit_redo_last_reboot(0);
+                rc = call_s_varm_crit_redo_last_reboot(0);
             }
             always->zero_init.pending_rollback_version_otp_info.word = 0;
         }
@@ -142,7 +148,7 @@ int __exported_from_arm s_varm_api_explicit_buy(uint8_t *buffer, uint32_t buffer
     canary_entry(S_VARM_API_EXPLICIT_BUY);
     hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
     int rc;
-    typeof(bootram->always) *always = __get_opaque_ptr(&bootram->always);
+    typeof(bootram->always) *always = get_always_ptr();
     // clear this; the next commands will add any flags
     always->recent_boot.tbyb_and_update_info = 0;
     // note we do this first because it can cause a reboot, and we don't want to clear TBYB flag or erase
@@ -151,15 +157,16 @@ int __exported_from_arm s_varm_api_explicit_buy(uint8_t *buffer, uint32_t buffer
     if (rc) goto explicit_buy_done;
     // if applying the version fails, we do go ahead and clear the TBYB flag; we count this as a TBYB failure
     if (always->zero_init.tbyb_flag_flash_addr) {
+        uint32_t sector_size = __get_opaque_value(FLASH_SECTOR_SIZE);
         printf("CLEARING TBYB flag at %08x\n", always->zero_init.tbyb_flag_flash_addr);
         // clear TBYB flag
-        if (buffer_size < FLASH_SECTOR_SIZE) {
+        if (buffer_size < sector_size) {
             rc = BOOTROM_ERROR_BUFFER_TOO_SMALL;
             goto explicit_buy_done;
         }
         uint32_t sector_base = always->zero_init.tbyb_flag_flash_addr & ~FLASH_SECTOR_REMAINDER_MASK;
         uint32_t sector_offset = always->zero_init.tbyb_flag_flash_addr - sector_base;
-        s_varm_crit_flash_read_data(buffer, sector_base - XIP_BASE, FLASH_SECTOR_SIZE);
+        s_varm_crit_flash_read_data(buffer, sector_base - XIP_BASE, sector_size);
         s_varm_flash_sector_erase(sector_base - XIP_BASE);
         bootrom_assert(MISC, (always->zero_init.tbyb_flag_flash_addr & 3u) == 0);
         // Patch most-significant byte of IMAGE_TYPE_EXE halfword. This is offset by 3 bytes from
@@ -169,7 +176,7 @@ int __exported_from_arm s_varm_api_explicit_buy(uint8_t *buffer, uint32_t buffer
         static_assert(((PICOBIN_IMAGE_TYPE_EXE_TBYB_BITS >> 8) << 8) == PICOBIN_IMAGE_TYPE_EXE_TBYB_BITS, "");
         bootrom_assert(MISC, buffer[sector_offset + 3] & ((uint32_t)PICOBIN_IMAGE_TYPE_EXE_TBYB_BITS >> 8));
         buffer[sector_offset + 3] &= 0xffu & ~((uint32_t)PICOBIN_IMAGE_TYPE_EXE_TBYB_BITS >> 8);
-        s_varm_api_flash_range_program(sector_base - XIP_BASE, buffer, FLASH_SECTOR_SIZE);
+        s_varm_api_flash_range_program(sector_base - XIP_BASE, buffer, sector_size);
         always->zero_init.tbyb_flag_flash_addr = 0;
     }
 
@@ -185,7 +192,7 @@ __noinline int s_varm_crit_ram_trash_verify_and_launch_flash_image(boot_scan_con
     canary_entry(S_VARM_CRIT_RAM_TRASH_VERIFY_AND_LAUNCH_FLASH_IMAGE);
     parsed_image_def_t * image_def = &parsed_block_loop->image_def;
 
-    typeof(bootram->always) *always = __get_opaque_ptr(&bootram->always);
+    typeof(bootram->always) *always = get_always_ptr();
 
     // SECURITY NOTE: WE DO WORK HERE BEFORE VERIFYING THE IMAGE, HOWEVER NOTHING MORE UNPLEASANT THAN SETTING UP ATRANS, WHICH WE
     //                WILL UNDO AGAIN IF THE VERIFICATION FAILS. This is done to keep all the (final) verification in one place
@@ -243,7 +250,6 @@ __noinline int s_varm_crit_ram_trash_verify_and_launch_flash_image(boot_scan_con
                 roll += this_size;
             }
         }
-
     }
 
     rc = s_varm_crit_ram_trash_verify_and_launch_image(ctx, parsed_block_loop);
@@ -283,51 +289,89 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
         }
     }
 
-    uint32_t image_base_vma = image_def->core.enclosing_window.base;
-    // rolled_window_base is where the start of the image is in its rolled address space (ignore
-    // rolling_window_delta on non-rollable binaries; i.e. everything except XIP CS 0)
-    if ((image_base_vma >> 24) == (XIP_BASE >> 24)) {
-        image_base_vma = XIP_BASE - image_def->rolling_window_delta;
-    }
-    if (!image_def->rolled_vector_table_addr) {
-        // the default vector table addr is the start of the image
-        image_def->rolled_vector_table_addr = image_base_vma;
-    }
-    if (!image_def->rolled_entry_point_addr) {
-        // note: check image_type not current boot cpu to clarify printfs as much as anything... if it
-        // is the wrong CPU it won't be booted anyway, so whatever we set doesn't matter
-        register uint32_t new_sp asm ("r0");
-        register uint32_t new_pc asm ("r1") = 0;
-        if (inline_s_executable_image_def_cpu_type(image_def) != PICOBIN_IMAGE_TYPE_EXE_CPU_RISCV) {
-            // Note ctx->window_base has been rolled, so for flash images we read through a
-            // translating XIP alias. Cached is fine: we should have flushed during verification.
-            uintptr_t src = image_def->rolled_vector_table_addr;
-            // we don't check alignment of the vtable for size; if it is bad, it is bad at this point.
-            printf("initializing ARM entry point from vtable at %08x\n", src);
-            pico_default_asm_volatile(
-                "ldmia %0!, {%[new_sp], %[new_pc]}\n"
-                : "+l" (src), [new_sp] "+l" (new_sp), [new_pc] "+l" (new_pc)
-                );
-        } else {
-            // default PC to start of image (note we use asm for the assignment to keep the new_pc = 0 in the common path above
-            pico_default_asm_volatile(
-                "mov %0, %1\n"
-                : "+l" (new_pc)
-                : "r" (image_base_vma)
-                );
-            new_sp = INVALID_STACK_PTR;
+    // if PICOBIN_IMAGE_TYPE_EXE_EXTRA_SECURITY_BITS is set, then we require
+    // vector_table_addr and entry_point_addr to be set in the IMAGE_DEF,
+    // and we will not do any of the defaulting here (which is hard to harden).
+    //
+    // If the values were not set in the IMAGE_DEF (this should have already been checked)
+    // then they will most likely be either 0 or 14 (for reason for 14, see s_varm_parse_block)
+    //
+    // both 0 and 14 are treated as 0 by M33 for VTOR, so we get the default ROM vector table
+    // both 0 and 14 are invalid entry points as they don't have the thumb bit set
+    if (!(image_def->image_type_flags & PICOBIN_IMAGE_TYPE_EXE_EXTRA_SECURITY_BITS)) {
+        uint32_t image_base_vma = image_def->core.enclosing_window.base;
+        // rolled_window_base is where the start of the image is in its rolled address space (ignore
+        // rolling_window_delta on non-rollable binaries; i.e. everything except XIP CS 0)
+        if ((image_base_vma >> 24) == (XIP_BASE >> 24)) {
+            image_base_vma = XIP_BASE - image_def->rolling_window_delta;
         }
-        rcp_iequal(__get_opaque_ptr(image_def)->rolled_entry_point_addr, 0);
-        static_assert(offsetof(parsed_image_def_t, rolled_entry_point_addr) ==
-                      offsetof(parsed_image_def_t, initial_sp) + 4, "");
-        static_assert(offsetof(parsed_image_def_t, initial_sp_limit) ==
-                      offsetof(parsed_image_def_t, initial_sp) + 8, "");
-        uintptr_t dest = (uintptr_t)&image_def->initial_sp;
+        if (!image_def->rolled_vector_table_addr) {
+            // the default vector table addr is the start of the image
+            image_def->rolled_vector_table_addr = image_base_vma;
+        }
+        register uint32_t new_pc asm ("r1") = 0;
+
+        // go back all the way to the block data to check entry point required again
+        uint32_t word1 = parsed_block_loop->image_def_data[1];
+        // word1 is 0xaaaaxxxx where aaaa is image_type flags;
+        // image_type_flags top 6 bits bit are
+        // TBYB:1 (should be 0 as it is cleared in parse_blocks for hashing)
+        // CHIP_TYPE:3 (should be 1 as it is RP2350)
+        // EXTRA_SECURITY:1 this is what we want to assert is 0
+        uint32_t entry_point_required = 0x1d; // of the 5 bits, low bit of chip_type can be 1
+        word1 >>= 27;
         pico_default_asm_volatile(
-            "stmia %0!, {%[new_sp], %[new_pc], %[zero]}\n"
-            : "+l" (dest), [new_sp] "+l" (new_sp), [new_pc] "+l" (new_pc)
-            : [zero] "l" (0)
+                "ands %[epr], %[word1]\n"
+                : [epr] "+l"(entry_point_required)
+                : [word1] "l"(word1)
+                : "cc"
+        );
+        // if we required an entry point, we should have checked that already
+        rcp_iequal(entry_point_required, new_pc);
+        if (!image_def->rolled_entry_point_addr) {
+            // want a different register for this check, so do it in asm
+            // rcp_iequal(image_def->rolled_entry_point_addr, new_pc);
+            rcp_asm(
+                    "mcrr2 p7, #7, %[repa], %[new_pc], c0" // rcp_iequal_nodelay
+                    :
+                    : [repa] "r" (image_def->rolled_entry_point_addr),
+                      [new_pc] "r" (new_pc),
+                      [dummy] "r" (entry_point_required) // to prevent repa/entry_point_required sharing a register
             );
+
+            register uint32_t new_sp asm ("r0");
+            // note: check image_type not current boot cpu to clarify printfs as much as anything... if it
+            // is the wrong CPU it won't be booted anyway, so whatever we set doesn't matter
+            if (inline_s_executable_image_def_cpu_type(image_def) != PICOBIN_IMAGE_TYPE_EXE_CPU_RISCV) {
+                // Note ctx->window_base has been rolled, so for flash images we read through a
+                // translating XIP alias. Cached is fine: we should have flushed during verification.
+                uintptr_t src = image_def->rolled_vector_table_addr;
+                // we don't check alignment of the vtable for size; if it is bad, it is bad at this point.
+                printf("initializing ARM entry point from vtable at %08x\n", src);
+                pico_default_asm_volatile(
+                        "ldmia %[src]!, {%[new_sp], %[new_pc]}\n"
+                : [src] "+l"(src), [new_sp] "+l"(new_sp), [new_pc] "+l"(new_pc)
+                );
+            } else {
+                // default PC to start of image (note we use asm for the assignment to keep the new_pc = 0 in the common path above
+                pico_default_asm_volatile(
+                        "mov %[new_pc], %[image_base_vma]\n"
+                : [new_pc] "+l"(new_pc)
+                : [image_base_vma] "r"(image_base_vma)
+                );
+                new_sp = INVALID_STACK_PTR;
+            }
+            static_assert(offsetof(parsed_image_def_t, rolled_entry_point_addr) ==
+                          offsetof(parsed_image_def_t, initial_sp) + 4, "");
+            static_assert(offsetof(parsed_image_def_t, initial_sp_limit) ==
+                          offsetof(parsed_image_def_t, initial_sp) + 8, "");
+            uintptr_t dest = (uintptr_t) &image_def->initial_sp;
+            pico_default_asm_volatile(
+                    "stmia %[dest]!, {%[new_sp], %[new_pc], %[zero]}\n"
+                    : [dest] "+l"(dest), [new_sp] "+l"(new_sp), [new_pc] "+l"(new_pc)
+                    : [zero] "l"(0)
+            );
+        }
     }
 #if MINI_PRINTF
     printf("Launch IMAGE_DEF (note: flash address is rolled when rolling):\n");
@@ -337,7 +381,7 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
     static_assert(PICOBIN_IMAGE_TYPE_EXE_CPU_RISCV < PICOBIN_IMAGE_TYPE_EXE_CPU_VARMULET, "");
     if (inline_s_executable_image_def_cpu_type(image_def) != ctx->boot_cpu && inline_s_executable_image_def_cpu_type(image_def) < PICOBIN_IMAGE_TYPE_EXE_CPU_VARMULET) {
         // hardening: since swap cpu doesn't work on a secure chip; i think a regular boolean is fine
-        hx_bool swap_cpu_disabled = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_AUTO_SWITCH_ARCH_LSB);
+        hx_bool swap_cpu_disabled = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_AUTO_SWITCH_ARCH_LSB);
         if (hx_is_true(swap_cpu_disabled)) {
             printf("Not booting image as swap-cpu is disabled\n");
             rc = BOOTROM_ERROR_INVALID_STATE; // not bootable on current architecture
@@ -346,7 +390,7 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
             printf("image has other CPU\n");
             uint flags = (ctx->boot_cpu == PICOBIN_IMAGE_TYPE_EXE_CPU_ARM ? REBOOT2_FLAG_REBOOT_TO_RISCV
                                                                          : REBOOT2_FLAG_REBOOT_TO_ARM);
-            rc = s_varm_crit_redo_last_reboot(flags);
+            rc = call_s_varm_crit_redo_last_reboot(flags);
             // since we pass REBOOT2_FLAG_NO_RETURN, it will only return if there is an error
             bootrom_assert(MISC, rc);
             goto verify_and_launch_image_done;
@@ -360,7 +404,7 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
     }
 
     printf("do security re-checks...\n");
-    typeof(bootram->always) *always = __get_opaque_ptr(&bootram->always);
+    typeof(bootram->always) *always = get_always_ptr();
     hx_check_step(STEPTAG_S_VARM_CRIT_RAM_TRASH_LAUNCH_IMAGE_BASE);
     hx_assert_true(is_image_def_verified(image_def));
     // if secure, then sig_key_match must be true
@@ -369,7 +413,7 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
     // don't think this is super necessary
 //    hx_assert_equal2i(image_def->image_type_flags & PICOBIN_IMAGE_TYPE_EXE_CHIP_BITS, PICOBIN_IMAGE_TYPE_EXE_CHIP_AS_BITS(RP2350));
     hx_check_step(STEPTAG_S_VARM_CRIT_RAM_TRASH_LAUNCH_IMAGE_MID_CHECK);
-    hx_xbool secure_and_need_rollback_version = hx_step_safe_get_boot_flagx(OTP_DATA_BOOT_FLAGS0_ROLLBACK_REQUIRED_LSB);
+    hx_xbool secure_and_need_rollback_version = call_hx_step_safe_get_boot_flagx(OTP_DATA_BOOT_FLAGS0_ROLLBACK_REQUIRED_LSB);
     hx_bool has_rollback_version = hx_uint32_to_bool_checked(image_def->core.rollback_version);
     // note we don't verify signature in non-secure mode, so signature_verified will be false
     // note, this check also makes sure that we didn't try to boot an image which we verified
@@ -410,18 +454,37 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
             }
             static_assert(WATCHDOG_CTRL_TIME_BITS == 0xffffffu, "");
             printf("Setting %d second watchdog timer for TBYB (will do regular reboot then)\n", WATCHDOG_CTRL_TIME_BITS / 1000);
+#if !ASM_SIZE_HACKS
             s_varm_api_reboot(REBOOT2_FLAG_REBOOT_TYPE_NORMAL, WATCHDOG_CTRL_TIME_BITS, 0, 0);
+#else
+            register uint32_t r0 asm ("r0") = REBOOT2_FLAG_REBOOT_TYPE_NORMAL;
+            register uint32_t r1 asm ("r1");
+            register uint32_t r2 asm ("r2");
+            register uint32_t r3 asm ("r3");
+            static_assert(REBOOT2_FLAG_REBOOT_TYPE_NORMAL == 0, "");
+            static_assert(((uint32_t)(0-1) >> 8) == WATCHDOG_CTRL_TIME_BITS, "");
+            pico_default_asm_volatile(
+                "subs r1, r0, #1\n"
+                "lsrs r1, #8\n" // 0x00ffffff
+                "movs r2, #0\n"
+                "movs r3, #0\n" // not strictly necessary since the parameter is unused but we have a mis-align anyway
+                : "=&l" (r1), "=&l" (r2), "=&l" (r3)
+                : "l" (r0)
+                : "cc");
+            s_varm_api_reboot(r0, r1, r2, r3);
+#endif
         }
         always->zero_init.allow_core0_autovarm = 1; // we're no longer in preboot
         printf("entering image...\n");
         // Wait until UART FIFO is empty, as the UART may be imminently reset (for development builds only!)
         mini_printf_flush();
-        hx_bool disable_xip = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_XIP_ACCESS_ON_SRAM_ENTRY_LSB);
+        hx_bool disable_xip = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_XIP_ACCESS_ON_SRAM_ENTRY_LSB);
         if (hx_is_true(disable_xip)) {
             static_assert((XIP_BASE >> 28) == 0x1, "");
             static_assert((SRAM_BASE >> 28) == 0x2, "");
             uint32_t pc_hi = image_def->rolled_entry_point_addr >> 28;
             if (pc_hi == 2) {
+                __dataflow_barrier(pc_hi);
                 --pc_hi;
                 // Make XIP non-executable, wtthout relying on MPU: best we can do is disable all proc access.
                 accessctrl_hw->xip_main = ACCESSCTRL_PASSWORD_BITS | (ACCESSCTRL_XIP_MAIN_RESET & ~(
@@ -433,7 +496,8 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
             hx_assert_false(disable_xip);
         }
         mpu_save_state_t save_state;
-        s_save_clear_and_disable_mpu(ctx->mpu_on_arm, &save_state); // re-enable rwx
+        // clear MPU (we don't care about the saved data, but use the common function)
+        inline_s_save_clear_and_disable_mpu(ctx->mpu_on_arm, &save_state);
         hx_check_step(STEPTAG_S_VARM_CRIT_RAM_TRASH_LAUNCH_IMAGE_PRE_THUNK);
         // thunk which sets up default XIP setup (default is to restore the mode/clkdiv found by try_flash_boot), then adjusts the stack
         varm_to_s_native_crit_init_default_xip_setup_and_enter_image_thunk(ctx->flash_mode, ctx->flash_clkdiv,
@@ -492,8 +556,8 @@ int s_varm_crit_ram_trash_checked_ram_or_flash_window_launch(boot_scan_context_t
         register uintptr_t r0 asm ("r0") = 1; // true arg
         register uintptr_t r1 asm ("r1");
         // on return
-        // r0 = hw_set_alias(&bootrom->always->boot_diagnostic)
-        // r1 = &bootrom->always->boot_diagnostic
+        // r0 = hw_set_alias(&bootram->always->boot_diagnostic)
+        // r1 = &bootram->always->boot_diagnostic
         pico_default_asm_volatile(
                 "bl s_varm_init_diagnostic32_impl\n"
         : "+l" (r0), "=l" (r1) : : "r2", "ip", "lr", "cc"

@@ -39,7 +39,8 @@ for k in sorted(list(seen_count_set.keys())):
 		mismatches += 1
 
 for k in sorted(list(seen_canary_get.keys())):
-	if k not in seen_canary_check:
+    # 0x7d is SIG_DISRUPTER which is just used as a random value
+	if k not in seen_canary_check and k != 0x7d:
 		print("No check found for rcp_canary_set of 0x{:02x}".format(k))
 		print("  ^^^ first seen on line: " + seen_canary_get[k])
 		mismatches += 1

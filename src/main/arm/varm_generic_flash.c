@@ -71,7 +71,7 @@ void __exported_from_arm s_varm_api_crit_connect_internal_flash(void) {
     pads_qspi_hw_t *pads_qspi = (pads_qspi_hw_t *)(((uintptr_t)iobank1) + x10000);
 #endif
 
-    pads_qspi->voltage_select = hx_is_true(hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_FLASH_IO_VOLTAGE_1V8_LSB));
+    pads_qspi->voltage_select = hx_is_true(call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_FLASH_IO_VOLTAGE_1V8_LSB));
 
     // Then mux XIP block onto internal QSPI flash pads
     static_assert(offsetof(io_qspi_hw_t, io[0].ctrl) == 20, "");
@@ -81,14 +81,14 @@ void __exported_from_arm s_varm_api_crit_connect_internal_flash(void) {
         iobank1[2 * i + 5] = 0;
     }
 #else
-    __asm volatile (
-        "str %1, [%0, #20];" \
-        "str %1, [%0, #28];" \
-        "str %1, [%0, #36];" \
-        "str %1, [%0, #44];" \
-        "str %1, [%0, #52];" \
-        "str %1, [%0, #60];"
-    ::"r" (iobank1), "r" (0));
+    pico_default_asm_volatile (
+        "str %[zero], [%[iobank1], #20]\n"
+        "str %[zero], [%[iobank1], #28]\n"
+        "str %[zero], [%[iobank1], #36]\n"
+        "str %[zero], [%[iobank1], #44]\n"
+        "str %[zero], [%[iobank1], #52]\n"
+        "str %[zero], [%[iobank1], #60]\n"
+    : : [iobank1] "r" (iobank1), [zero] "r" (0));
 #endif
 
     // Finally, remove latching pad isolation
@@ -338,7 +338,7 @@ void __exported_from_arm s_varm_api_crit_flash_exit_xip(void) {
         (QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB);
 
     // If there are two QSPI devices, we need to issue the exit sequence to both of them.
-    uint n_chip_selects = 1 + (s_varm_flash_devinfo_get_size(1) > 0);
+    uint n_chip_selects = 1 + (inline_s_varm_flash_devinfo_get_size(1) > 0);
     for (uint cs = 0; cs < n_chip_selects; ++cs) {
 
         uint32_t padctrl_tmp = (qspi_sd_padctrl->sd0 & ~PADS_QSPI_GPIO_QSPI_SD0_PUE_BITS) |
@@ -422,6 +422,7 @@ void __exported_from_arm s_varm_api_crit_flash_reset_address_trans(void) {
         "str %[tmp], [%[atrans], %[offset]]\n"
         "subs %[offset], #4\n"
         "bcs 1b\n"
+        "bcs 1b\n" // fill alignment hole
         : [tmp] "=&l" (tmp), [offset] "+l" (offset)
         : [size] "l" (size), [atrans] "l" (&qmi_hw->atrans[0])
         : "cc", "memory"
@@ -529,8 +530,11 @@ void __used s_varm_flash_abort_common(uint32_t clear) {
 // Also allow any unbounded loops to check whether the above abort condition
 // was asserted, and terminate early
 int s_varm_flash_was_aborted(void) {
-    return *(io_rw_32 *) (IO_QSPI_BASE + IO_QSPI_GPIO_QSPI_SD1_CTRL_OFFSET)
-           & IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_BITS;
+    static_assert(IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_VALUE_LOW & 0x2);
+    static_assert(!(IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_VALUE_NORMAL & 0x2));
+    static_assert(IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_LSB + 1 == IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_MSB);
+    uint32_t ctrl = *(io_rw_32 *) (IO_QSPI_BASE + IO_QSPI_GPIO_QSPI_SD1_CTRL_OFFSET);
+    return (int32_t)(ctrl << (31u - IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_MSB)) < 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -723,7 +727,7 @@ bool __noinline s_varm_flash_check_in_bounds_single_addr(flash_offset_t offset) 
         goto single_addr_done;
     }
     uint cs = inline_s_varm_flash_cs_from_offset(offset);
-    if (offset - cs * (1u << 24) >= s_varm_flash_devinfo_get_size(cs)) {
+    if (offset - cs * (1u << 24) >= inline_s_varm_flash_devinfo_get_size(cs)) {
         rc = false;
         goto single_addr_done;
     }

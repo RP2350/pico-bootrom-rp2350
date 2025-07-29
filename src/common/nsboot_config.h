@@ -27,4 +27,5 @@ typedef struct {
     chip_id_t chip_id;
 } __aligned(4) nsboot_config_t;
 
+static_assert(sizeof(nsboot_config_t) == NSBOOT_CONFIG_SIZE, "");
 #define nsboot_config ((nsboot_config_t *)NSBOOT_RAM_START)

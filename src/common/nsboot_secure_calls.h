@@ -59,10 +59,10 @@ int sc_or_varm_picoboot_exec2(struct picoboot_exec2_cmd *cmd);
 
 __force_inline void sc_or_varm_connect_internal_flash(void) {
     pico_default_asm_volatile (
-        "movs r3, %0\n"
+        "movs r3, %[sc_const]\n"
         "bl sc_or_varm_common\n"
         :
-        : "i" (SC_connect_internal_flash)
+        : [sc_const] "i" (SC_connect_internal_flash)
         : "r0", "r1", "r2", "r3", "lr", "ip", "cc"
     );
 }
@@ -70,10 +70,10 @@ __force_inline void sc_or_varm_connect_internal_flash(void) {
 __force_inline int sc_or_varm_flash_sector_erase(uint32_t addr) {
     register uint32_t r0 asm("r0") = addr; 
     pico_default_asm_volatile (
-        "movs r3, %1\n"
+        "movs r3, %[sc_const]\n"
         "bl sc_or_varm_common\n"
         : "+r" (r0)
-        : "i" (SC_flash_sector_erase)
+        : [sc_const] "i" (SC_flash_sector_erase)
         : "r1", "r2", "r3", "lr", "ip", "cc"
     );
     return (int)r0;
@@ -84,10 +84,10 @@ __force_inline int sc_or_varm_flash_read_data(uint8_t *rx, uint32_t addr, size_t
     register uint32_t r1 asm("r1") = addr;
     register size_t   r2 asm("r2") = count;
     pico_default_asm_volatile (
-        "movs r3, %3\n"
+        "movs r3, %[sc_const]\n"
         "bl sc_or_varm_common\n"
         : "+r" (r0), "+r" (r1), "+r" (r2)
-        : "i" (SC_flash_read_data)
+        : [sc_const] "i" (SC_flash_read_data)
         : "r3", "lr", "ip", "cc"
     );
     return (int)r0;
@@ -97,10 +97,10 @@ __force_inline int sc_or_varm_flash_page_program(const uint8_t *data, uint32_t a
     register const uint8_t *r0 asm("r0") = data;
     register uint32_t       r1 asm("r1") = addr;
     pico_default_asm_volatile (
-        "movs r3, %2\n"
+        "movs r3, %[sc_const]\n"
         "bl sc_or_varm_common\n"
         : "+r" (r0), "+r" (r1)
-        : "i" (SC_flash_page_program)
+        : [sc_const] "i" (SC_flash_page_program)
         : "r2", "r3", "lr", "ip", "cc"
     );
     return (int)r0;
@@ -111,10 +111,10 @@ __force_inline int sc_or_varm_get_partition_table_info(uint32_t *out_buffer, uin
     register uint32_t  r1 asm("r1") = out_buffer_word_size;
     register uint32_t  r2 asm("r2") = flags;
     pico_default_asm_volatile (
-        "movs r3, %3\n"
+        "movs r3, %[sc_const]\n"
         "bl sc_or_varm_common\n"
         : "+r" (r0), "+r" (r1), "+r" (r2)
-        : "i" (SC_get_partition_table_info)
+        : [sc_const] "i" (SC_get_partition_table_info)
         : "r3", "lr", "ip", "cc"
     );
     return (int)r0;
@@ -126,10 +126,10 @@ __force_inline int sc_or_varm_get_sys_info(uint32_t *out_buffer, uint32_t out_bu
     register uint32_t  r1 asm("r1") = out_buffer_word_size;
     register uint32_t  r2 asm("r2") = flags;
     pico_default_asm_volatile (
-        "movs r3, %3\n"
+        "movs r3, %[sc_const]\n"
         "bl sc_or_varm_common\n"
         : "+r" (r0), "+r" (r1), "+r" (r2)
-        : "i" (SC_get_sys_info)
+        : [sc_const] "i" (SC_get_sys_info)
         : "r3", "lr", "ip", "cc"
     );
     return (int)r0;

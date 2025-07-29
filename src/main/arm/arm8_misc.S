@@ -453,5 +453,9 @@ s_native_crit_mem_copy_by_words_impl:
     blo 1b
 2:
     subs r0, r3
-    rcp_canary_check_nodelay ip, CTAG_S_NATIVE_CRIT_MEM_COPY_BY_WORDS_IMPL
+    // do some register trashing of r1 and r4 to help out hardening of certain callers
+    // where the end register values are useful (e.g. hashing during signature check)
+    mov r1, ip
+    mov r4, r1
+    rcp_canary_check_nodelay r4, CTAG_S_NATIVE_CRIT_MEM_COPY_BY_WORDS_IMPL
     pop {r4, pc}

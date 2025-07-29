@@ -61,7 +61,7 @@ _magic:
 _major_version:
 .byte 2
 _minor_version:
-.byte 3
+.byte 4
 
 _arm_well_known_rom_table_base:
 .hword BOOTROM_ROMTABLE_START
@@ -77,10 +77,25 @@ copyright:
 cpacr:
 .word PPB_BASE + M33_CPACR_OFFSET
 
-#define TT_VALUE_OFFSET 0x38
 .global tt_value
 tt_value:
 .word 0x2c70703
+
+.global always_pointer
+always_pointer:
+.word BOOTRAM_BASE + BOOTRAM_ALWAYS_OFFSET
+
+.global partition_table_pointer
+partition_table_pointer:
+.word BOOTRAM_BASE + BOOTRAM_ALWAYS_PARTITION_TABLE_OFFSET
+
+.global msc_pointer
+msc_pointer:
+.word NSBOOT_MSC_START
+
+.global flash_devinfo16_ptr
+flash_devinfo16_ptr:
+.word BOOTRAM_BASE + BOOTRAM_ALWAYS_FLASH_DEVINFO_OFFSET
 
 // Args: 2-char symbol in r0, flag query in r1.
 // Each table entry is a 2-char symbol, an hword of flags, and then 1 hword of
@@ -201,14 +216,7 @@ s_arm8_entry_point:
 
     // enable canary processor
     // CPACR = M33_CPACR_CP7_BITS
-    movs r2, #0 // done here not below for alignment
-
-    .p2align 2 // this is the case
-    // lets delay one core a cycle (requires alignment so nop is free on fall thru)
-    // since you'd have to glitch both during the SAU checks below)
-    cbz r7, 1f
-    nop
-1:
+    movs r2, #0
     ldr r0, [r2, #CPACR_OFFSET]
     movs r1, #M33_CPACR_CP7_BITS
     str r1, [r0]
@@ -422,12 +430,14 @@ check_mpu_loop2:
 1:
 
     // Check if this is core 0, and go to holding pen if not enter main booth path
+    // Note: if we glitch this it doesn't help much; if both cores run as core 0
+    //       then we will crash; if neither does, then we won't boot
 check_core:
     // NOTE: We DO NOT use any stack prior to possible watchdog entry
     cbnz r7, core1_boot_path
 
 set_secure_stack:
-    // r3 is currently invalid (mostz likely 0x2c70703)
+    // r3 is currently invalid (most likely 0x2c70703)
     ldr r3, =BOOTRAM_PREBOOT_STACK_TOP
     subs r0, r3, #BOOTRAM_PREBOOT_STACK_SIZE
     msr msplim, r0
@@ -450,39 +460,7 @@ zero_secure_stack:
     // our limited stack space for a function that will never return
     b s_varm_crit_core0_boot_path_entry_p2 - 2
 
-#define MPU_REGION_RO_XN(n, rbar, rlar) \
-   .word rbar + M33_MPU_RBAR_XN_BITS + (2 << M33_MPU_RBAR_AP_LSB), \
-    (rlar) + M33_MPU_RLAR_EN_BITS + 0x10 // note 0x10 will be written but not read back
-.p2align 2
-bootrom_mpu_regs:
-    /* ctrl */ .word M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS
-initial_sau_value:
-    /* rnr */  .word 0x02ce0700 // note RNR is only 3 bits, so this value is 0 for that purpose (we save 4 bytes by putting constant here)
-#if BOOTROM_MPU_REGION_BOOTRAM_CORE1 != 0 || \
-    BOOTROM_MPU_REGION_RAM != 1 || \
-    BOOTROM_MPU_REGION_FLASH != 2 || \
-    BOOTROM_MPU_REGION_SECURE_XN != 3
-#error mpu regions should be in order
-#endif
-    // note this range isn't exact due to alignment (we round inwards) but it is still between the core 0 stack and our always data
-    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_BOOTRAM_CORE1,
-                     (BOOTRAM_BASE + BOOTRAM_RUNTIME_CORE1_OFFSET + HACK_STACK_WORDS * 4 + 0x1fu) & ~0x1fu,
-                     (BOOTRAM_BASE + BOOTRAM_ALWAYS_OFFSET - 0x1fu) & ~0x1fu)
-    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_RAM,
-                     SRAM_BASE,
-                     SRAM_END - 0x20)
-    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_FLASH,
-                     XIP_BASE,
-                     SRAM_BASE - 0x20)
-    // note this must be at the end as we don't reset RNR before updating it for core1
-    // (we move the base to _end_of_core1_boot_path)
-    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_SECURE_XN,
-                     __start_of_secure_xn,
-                     // note we make all of SG XN as well since we dont need it until NS BOOT
-                     // except for a little bit at the end. (note we want the round down, which is
-                     // the first -32, then -0x20 for inclusive)
-                     __sg_bootpath_needed_start_roundup_32 - 32 - 0x20)
-mpu_regions_end:
+    // falling thru here will immediately crash on the canaries below
 
 // ----------------------------------------------------------------------------
 // Core 1 boot path
@@ -613,7 +591,7 @@ core_0_handshake_loop:
     bl send_and_then
     rcp_count_check STEPTAG_ASM_C1_BOOTPATH + 3
     adr r5, core1_launch
-    // receive IP (0 sends us back into handshake loop)
+    // receive PC (0 sends us back into handshake loop)
     bl send_and_then
 .thumb_func
 core1_launch:
@@ -645,6 +623,44 @@ core1_launch:
 .global _end_of_core1_boot_path
 _end_of_core1_boot_path:
 
+// falling thru here will hit an undefined instruction in the table
+
+#define MPU_REGION_RO_XN(n, rbar, rlar) \
+   .word rbar + M33_MPU_RBAR_XN_BITS + (2 << M33_MPU_RBAR_AP_LSB), \
+    (rlar) + M33_MPU_RLAR_EN_BITS + 0x10 // note 0x10 will be written but not read back
+.p2align 2
+bootrom_mpu_regs:
+    /* ctrl */ .word M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS
+initial_sau_value:
+    /* rnr */  .word 0x02ce0700 // note RNR is only 3 bits, so this value is 0 for that purpose (we save 4 bytes by putting constant here)
+#if BOOTROM_MPU_REGION_BOOTRAM_CORE1 != 0 || \
+    BOOTROM_MPU_REGION_RAM != 1 || \
+    BOOTROM_MPU_REGION_FLASH != 2 || \
+    BOOTROM_MPU_REGION_SECURE_XN != 3
+#error mpu regions should be in order
+#endif
+    // NOTE IF YOU CHANGE THE RLAR (BASE ADDRESSES HERE or the RO_XN-ness), YOU NEED TO CHANGE THE MAGIC NUMBER `expected_mixer` in `inline_s_restore_and_enable_mpu()`
+    //
+    // note this range isn't exact due to alignment (we round inwards) but it is still between the core 0 stack and our always data
+    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_BOOTRAM_CORE1,
+                     (BOOTRAM_BASE + BOOTRAM_RUNTIME_CORE1_OFFSET + HACK_STACK_WORDS * 4 + 0x1fu) & ~0x1fu,
+                     (BOOTRAM_BASE + BOOTRAM_ALWAYS_OFFSET - 0x1fu) & ~0x1fu)
+    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_RAM,
+                     SRAM_BASE,
+                     SRAM_END - 0x20)
+    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_FLASH,
+                     XIP_BASE,
+                     SRAM_BASE - 0x20)
+    // note this must be at the end as we don't reset RNR before updating it for core1
+    // (we move the base to _end_of_core1_boot_path)
+    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_SECURE_XN,
+                     __start_of_secure_xn,
+                     // note we make all of SG XN as well since we dont need it until NS BOOT
+                     // except for a little bit at the end. (note we want the round down, which is
+                     // the first -32, then -0x20 for inclusive)
+                     SG_BOOTPATH_NEEDED_START_ROUNDUP_32/*__sg_bootpath_needed_start_roundup_32*/ - 32 - 0x20)
+mpu_regions_end:
+
 // ----------------------------------------------------------------------------
 // Trampolines and trampoline-shaped objects
 // ----------------------------------------------------------------------------
@@ -671,7 +687,7 @@ s_native_crit_init_default_xip_setup_and_enter_image_thunk:
     // r9 = sp_lim
     // r10 = vector_table
 
-    // double check the entry-point again the image_def stored in the parsed_block_loop
+    // double check the entry-point against the image_def stored in the parsed_block_loop
     ldr r5, [sp, #8] // parsed_block_loop
     ldr r5, [r5, #PARSED_BLOCK_LOOP_IMAGE_DEF_ROLLED_ENTRY_POINT_ADDR_OFFSET]
     rcp_iequal r2, r5
@@ -716,11 +732,18 @@ s_native_crit_init_default_xip_setup_and_enter_image_thunk:
     rcp_iequal r4, r5
 2:
 
-    ldr r4, =(PPB_BASE + M33_VTOR_OFFSET)
-    str r10, [r4]
-
     // Copy default xip setup code into boot ram -- this code just restores the XIP mode found by try_flash_boot.
-    ldr r7, =BOOTRAM_BASE + BOOTRAM_XIP_SETUP_CODE_OFFSET
+    ldr r7, =BOOTRAM_BASE + BOOTRAM_XIP_SETUP_CODE_OFFSET + 0x80000000
+    // r4 should be in the 0x50000000 range at this point
+    lsls r4, r2, #31
+    // r4 should now be 0x80000000 (from r2 thumb bit)
+    subs r7, r4
+    // r7 should now be BOOTRAM_BASE + BOOTRAM_XIP_SETUP_CODE_OFFSET or in the 0xf0000000 range if the lsls was skipped)
+    //
+    // in either case the plan here is to cause a crash via stmia if the entry point thumb bit is not set; the reason we do that
+    // is that an "unset" PC when required via the EXTRA_SECURITY flag is equal to 14. This will cause a crash
+    // in the `blx r2` below, however this is technically a bit late as a user VTABLE has (may have) been installed by then
+    // so we'll take an exception into that which might run unexpected code.
     movw r6, P16(s_native_default_xip_setup)
 #if DEFAULT_ARM_XIP_SETUP_SIZE_BYTES == 12
     ldmia r6, {r4-r6}
@@ -737,13 +760,18 @@ s_native_crit_init_default_xip_setup_and_enter_image_thunk:
     // Write arguments for s_varm_flash_select_xip_read_mode after the default XIP code
     stmia r7!, {r0, r1}
 #endif
-
-    // enter binary
+    // set stack
     msr msplim, r9
     msr msp, r3
+    // install VTABLE
+    ldr r4, =(PPB_BASE + M33_VTOR_OFFSET)
+    str r10, [r4]
+    // from this point on any exception will go via the new VTABLE, however
+    // the count chek is NOT a regular exception
 #if FEATURE_CANARIES
     rcp_count_check STEPTAG_S_VARM_CRIT_RAM_TRASH_LAUNCH_IMAGE_THUNK_BASE
 #endif
+    // enter binary
     blx r2 // we don't expect the binary to return, but safe for us to hang (slightly better than no link register)
 
 .global native_wait_rescue, varm_wait_rescue
@@ -1009,7 +1037,6 @@ varm_to_s_native_secure_call_pc_sp: // (pc, sp or 0, a, b)
 VARM_TO_MULTIPLEX_PREAMBLE(s_native_crit_launch_nsboot)
 VARM_TO_MULTIPLEX_PREAMBLE(s_native_crit_xip_cache_maintenance)
 
-
 #if !USE_64K_BOOTROM
 .section .sg_fillers
 #else
@@ -1018,16 +1045,9 @@ VARM_TO_MULTIPLEX_PREAMBLE(s_native_crit_xip_cache_maintenance)
 
 .section .rodata.keep
 .p2align 2
-.global partition_table_ptr
-partition_table_ptr:
-.word BOOTRAM_BASE + BOOTRAM_ALWAYS_PARTITION_TABLE_OFFSET
-
-.global flash_devinfo16_ptr
-flash_devinfo16_ptr:
-.word BOOTRAM_BASE + BOOTRAM_ALWAYS_FLASH_DEVINFO_OFFSET
 
 // if 0 we can use the BOOTRAM_BASE constant from elsewhere
-#if 1 || BOOTRAM_XIP_SETUP_CODE_OFFSET != 0
+#if BOOTRAM_XIP_SETUP_CODE_OFFSET != 0
 xip_setup_func_ptr:
 .word BOOTRAM_BASE + BOOTRAM_XIP_SETUP_CODE_OFFSET
 #endif

@@ -62,7 +62,7 @@ static __force_inline void s_varm_nsboot_clock_setup(uint32_t pll_reset_mask) {
 
     s_varm_step_safe_reset_unreset_block_wait_noinline(pll_reset_mask);
 
-    hx_bool otp_osc_pll_setup_valid = hx_step_safe_get_boot_flag(
+    hx_bool otp_osc_pll_setup_valid = call_hx_step_safe_get_boot_flag(
             OTP_DATA_BOOT_FLAGS0_ENABLE_BOOTSEL_NON_DEFAULT_PLL_XOSC_CFG_LSB
     );
 
@@ -73,7 +73,11 @@ static __force_inline void s_varm_nsboot_clock_setup(uint32_t pll_reset_mask) {
     // XI floating, in which case we just have to hope the PLL doesn't lock.
     if (hx_is_true(otp_osc_pll_setup_valid)) {
         // A specific XOSC configuration has been programmed in OTP, so use it.
-        uint32_t xosc_config = inline_s_otp_read_ecc_guarded(OTP_DATA_BOOTSEL_XOSC_CFG_ROW);
+
+        check_ecc_pair(OTP_DATA_BOOTSEL_XOSC_CFG_ROW, OTP_DATA_USB_BOOT_FLAGS_ROW);
+        // RP2350-E17; not using guarded read as sibling ECC row is enabled by a different bit
+        //uint32_t xosc_config = inline_s_otp_read_ecc_guarded(OTP_DATA_BOOTSEL_XOSC_CFG_ROW);
+        uint32_t xosc_config = inline_s_otp_read_ecc(OTP_DATA_BOOTSEL_XOSC_CFG_ROW);
         uint xosc_range = (xosc_config & OTP_DATA_BOOTSEL_XOSC_CFG_RANGE_BITS) >>
                                                                                OTP_DATA_BOOTSEL_XOSC_CFG_RANGE_LSB;
         uint xosc_startup = (xosc_config & OTP_DATA_BOOTSEL_XOSC_CFG_STARTUP_BITS) >>
@@ -101,7 +105,10 @@ static __force_inline void s_varm_nsboot_clock_setup(uint32_t pll_reset_mask) {
     uint pll_postdiv2 = 5;
 
     if (hx_is_true(otp_osc_pll_setup_valid)) {
-        uint32_t pll_config = inline_s_otp_read_ecc_guarded(OTP_DATA_BOOTSEL_PLL_CFG_ROW);
+        check_ecc_pair(OTP_DATA_BOOTSEL_LED_CFG_ROW, OTP_DATA_BOOTSEL_PLL_CFG_ROW);
+        // RP2350-E17; not using guarded read as sibling ECC row is enabled by a different bit
+        //uint32_t pll_config = inline_s_otp_read_ecc_guarded(OTP_DATA_BOOTSEL_PLL_CFG_ROW);
+        uint32_t pll_config = inline_s_otp_read_ecc(OTP_DATA_BOOTSEL_PLL_CFG_ROW);
         pll_refdiv = 1 + ((pll_config & OTP_DATA_BOOTSEL_PLL_CFG_REFDIV_BITS) >>
                                                                               OTP_DATA_BOOTSEL_PLL_CFG_REFDIV_LSB);
         pll_fbdiv = (pll_config & OTP_DATA_BOOTSEL_PLL_CFG_FBDIV_BITS) >>
@@ -267,8 +274,8 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
     }
 
     // note nothing in nsboot_config can be set before this as nsboot_config is in USB RAM !!!
-    s_varm_step_safe_crit_mem_erase_by_words_const_size(USBCTRL_DPRAM_BASE, USBCTRL_DPRAM_SIZE, true);
-    nsboot_config->chip_id = *struct_member_ptr_shared_base(bootram, always, always.chip_id);
+    call_s_varm_step_safe_crit_mem_erase_by_words_const_size(USBCTRL_DPRAM_BASE, USBCTRL_DPRAM_SIZE, true);
+    nsboot_config->chip_id = get_always_ptr()->chip_id;
     printf("locking down otp for nsboot\n");
     uint32_t page = 0;
     uint32_t page2 = __get_opaque_value(0u);
@@ -334,9 +341,9 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
     hx_assert_equal2i(page2, num_pages);
     hx_assert_equal2i(page, num_pages2);
 
-    hx_bool disable_usb_msd      = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_MSD_IFC_LSB);
-    hx_bool disable_usb_picoboot = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_PICOBOOT_IFC_LSB);
-    hx_bool disable_uart_boot    = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_UART_BOOT_LSB);
+    hx_bool disable_usb_msd      = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_MSD_IFC_LSB);
+    hx_bool disable_usb_picoboot = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_PICOBOOT_IFC_LSB);
+    hx_bool disable_uart_boot    = call_hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_UART_BOOT_LSB);
 
     // Set up ACCESSCTRL, pin muxing, etc that is specific to each serial mode
     // We only support UART instance 0. Anything else can be implemented
@@ -373,7 +380,7 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
         pico_default_asm_volatile("hello, I am a bad instruction");
     }
     // need write for cache flush
-    inline_s_set_flash_rw_xn(mpu_on_arm);
+    inline_s_set_flash_ram_rw_xn(mpu_on_arm);
 
 #if FEATURE_UART_BOOT_SELECTABLE_INSTANCE
     nsboot_config->serial_mode_and_inst = (uint8_t)(serial_mode | (serial_inst << 4u));
@@ -387,13 +394,13 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
     // memories) caused by the cache implicitly doing an invalidate-by-tag
     // before the actual pinning, which drives chip enable to X because the
     // tag memory is initially all Xs. No, Graham, we can't remove this :-)
-    s_varm_api_crit_flash_flush_cache();
+    call_s_varm_api_crit_flash_flush_cache();
 
     // Pin entire XIP cache at top of cached address space, in case a RAM-only
     // binary wants to write to it. This will require a cache flush before
     // using the cache as a cache again. (note it is also used for
     // flash writing bitmaps)
-    s_varm_crit_pin_xip_ram();
+    call_s_varm_crit_pin_xip_ram();
 
     debug_label(stepx_nsboot_gpio_config);
     // if the BOOTSEL_FLAG_GPIO_PIN_SPECIFIED is set the usb_activity_pin_config is an explicitly chosen pin
@@ -402,7 +409,9 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
         usb_activity_pin = (uint32_t)-1; // default to disabled
         if (s_varm_step_safe_otp_read_rbit3_guarded(OTP_DATA_BOOT_FLAGS0_ROW) &
                                     (1u << OTP_DATA_BOOT_FLAGS0_ENABLE_BOOTSEL_LED_LSB)) {
-            uint32_t usbboot_cfg_word = inline_s_otp_read_ecc_guarded(OTP_DATA_BOOTSEL_LED_CFG_ROW);
+            check_ecc_pair(OTP_DATA_BOOTSEL_LED_CFG_ROW, OTP_DATA_BOOTSEL_PLL_CFG_ROW);
+            // RP2350-E17; not using guarded read as sibling ECC row is enabled by a different bit
+            uint32_t usbboot_cfg_word = inline_s_otp_read_ecc(OTP_DATA_BOOTSEL_LED_CFG_ROW);
             static_assert(OTP_DATA_BOOTSEL_LED_CFG_PIN_LSB == 0, "");
             static_assert(OTP_DATA_BOOTSEL_LED_CFG_PIN_MSB < 8, "");
             static_assert((OTP_DATA_BOOTSEL_LED_CFG_BITS & 0xff & ~OTP_DATA_BOOTSEL_LED_CFG_PIN_BITS) == 0, "");
@@ -486,14 +495,15 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
     // - XIP SRAM (SAU NS)
     // - USB RAM (IDAU Exempt, ACCESSCTRL NS)
     // USB RAM needs to be cleared anyway, since that's where .bss goes.
-    inline_s_set_ram_rw_xn(mpu_on_arm);
-    s_varm_step_safe_crit_mem_erase_by_words_const_size(XIP_SRAM_BASE, XIP_SRAM_END - XIP_SRAM_BASE, true);
+    call_s_varm_step_safe_crit_mem_erase_by_words_const_size(XIP_SRAM_BASE, XIP_SRAM_END - XIP_SRAM_BASE, true);
 
     // Launch USB boot client either in ARM non-secure mode, or via varmulet
 
     printf("entering NS boot\n");
-    // note this never returns (and is marked as such)
+    // note this never returns
     varm_to_s_native_crit_launch_nsboot();
+    // but let's hang just for good measure so we know where we're at if the call above is skipped
+    pico_default_asm_volatile("udf");
     __builtin_unreachable();
 }
 
@@ -529,10 +539,10 @@ int s_varm_ram_trash_get_uf2_target_partition_workarea(uint32_t family_id, resid
     }
 #endif
     // This gets redundant literals, but making this pointer opaque screws up register allocation:
-    resident_partition_table_t *pt = &bootram->always.partition_table;
+    resident_partition_table_t *pt = get_partition_table_ptr();
     int rc;
     if (!pt->partition_count || family_bit == PICOBIN_PARTITION_FLAGS_ACCEPTS_DEFAULT_FAMILY_ABSOLUTE_BITS) {
-        *partition_out = s_varm_flashperm_get_default_partition();
+        *partition_out = inline_s_varm_flashperm_get_default_partition(pt);
         if (!(family_bit & partition_out->permissions_and_flags)) {
             if (!pt->secure_item_address) {
                 printf("With no partition table, only ABSOLUTE, ARM_S, and RISCV are accepted\n");
@@ -610,19 +620,13 @@ int s_varm_ram_trash_get_uf2_target_partition_workarea(uint32_t family_id, resid
     canary_exit_return(S_VARM_RAM_TRASH_GET_UF2_TARGET_PARTITION_WORKAREA, rc);
 }
 
-int s_varm_ram_trash_get_uf2_target_partition(uint32_t family_id, resident_partition_t *partition_out) {
-    // we are starting a UF2 download, so happy to trash any part of RAM
-    uf2_target_workarea_t *uf2_target_workarea = (uf2_target_workarea_t *)SRAM0_BASE;
-    return s_varm_ram_trash_get_uf2_target_partition_workarea(family_id, partition_out, uf2_target_workarea);
-}
-
 static int s_varm_crit_ram_trash_find_uf2_target_partition(uf2_target_workarea_t *uf2_target_workarea, bool unowned_only,
                                                            bool bootable_only) {
     canary_entry(S_VARM_CRIT_RAM_TRASH_FIND_UF2_TARGET_PARTITION);
     int rc;
     boot_scan_context_t *ctx = &uf2_target_workarea->scan_workarea.ctx_holder.ctx;
     ctx->executable_image_def_only = bootable_only;
-    resident_partition_table_t *pt = __get_opaque_ptr(&bootram->always.partition_table);
+    resident_partition_table_t *pt = get_partition_table_ptr();
     for (int pi = 0; pi < pt->partition_count; pi++) {
         resident_partition_t *partition_a = pt->partitions + pi;
         if (!inline_s_is_b_partition(partition_a) && inline_s_partition_is_nsboot_writable(partition_a)) {

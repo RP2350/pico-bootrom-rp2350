@@ -22,8 +22,8 @@ int __used s_native_set_varmulet_user_stack(uint32_pair_t *base_size) {
     // uint32_t save = save_and_disable_interrupts();
     uint32_t save;
     pico_default_asm_volatile (
-            "csrrci %0, mstatus, 0x8\n"
-    : "=r" (save)
+            "csrrci %[save], mstatus, 0x8\n"
+    : [save] "=r" (save)
     );
 
     uint core_num = riscv_read_csr(mhartid);

@@ -166,9 +166,13 @@ void native_usb_stream_packet_handler(struct usb_endpoint *ep) {
 }
 
 void nsboot_set_gpio(bool on) {
-    if (nsboot_config->usb_activity_pin >= 0) {
+    // we no longer check (for code size) whether activity pin is disabled (-1) as
+    // a) NS won't have access to toggle any pins anyway
+    // b) -1 is effectively pin 63 due to implemetation of gpio_put()
+    static_assert(NUM_BANK0_GPIOS < 63, "");
+    // if (nsboot_config->usb_activity_pin >= 0) {
         gpio_put((uint)nsboot_config->usb_activity_pin, on);
-    }
+    // }
 }
 
 #ifndef __riscv

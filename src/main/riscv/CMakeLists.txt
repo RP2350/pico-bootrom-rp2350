@@ -57,7 +57,7 @@ set(ARM_IMPORTS
         varm_noop
 
         software_git_revision/d
-        partition_table_ptr/d
+        partition_table_pointer/d
         flash_devinfo16_ptr/d
         xip_setup_func_ptr/d
         )

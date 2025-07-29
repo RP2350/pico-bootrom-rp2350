@@ -21,9 +21,9 @@
 static __force_inline uintptr_t get_fp16(uint constant) {
     uintptr_t v;
     pico_default_asm(
-        "movw %0, %1\n"
-        : "=r" (v)
-        : "i" (constant)
+        "movw %[v], %[constant]\n"
+        : [v] "=r" (v)
+        : [constant] "i" (constant)
     );
     return v;
 }
@@ -34,6 +34,7 @@ static __force_inline uintptr_t get_fp16(uint constant) {
 #define P16_D(x) P16_TYPED(typeof(&(x)),x)
 // replaces func
 #define P16_F(x) P16_TYPED(typeof(&(x)),x)
+#define P16_F_CAST(t, x) P16_TYPED(t,x)
 // replaces array
 #define P16_A(x) P16_TYPED(typeof(&(x)[0]),x)
 #else
@@ -74,10 +75,10 @@ typedef struct {
 // constant every time some foldable operation is done on them:
 #define __get_opaque_value(val) __get_opaque_ptr(val)
 
-// Clone a value (in a more efficient way than __get_opaque_ptr
+// Clone a value (in a more efficient way than __get_opaque_ptr)
 #define __clone_value(v) ({ \
     typeof((v)+0) __rc; \
-    asm ("mov %0, %1\n" : "=&r"(__rc) : "r" (v)); \
+    asm ("mov %[rc], %[v]\n" : [rc] "=&r" (__rc) : [v] "r" (v)); \
     __rc; \
 })
 
@@ -120,11 +121,11 @@ static __force_inline uint32_t get_sp(void) {
     uint32_t rc;
     pico_default_asm(
 #ifdef __riscv
-        "mv %0, sp\n"
+        "mv %[rc], sp\n"
 #else
-        "mov %0, sp\n"
+        "mov %[rc], sp\n"
 #endif
-    : "=r" (rc));
+    : [rc] "=r" (rc));
     return rc;
 }
 #else

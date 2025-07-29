@@ -257,9 +257,9 @@ void write_uf2_page_complete(struct async_task *task) {
                 static_assert(RP2350_RISCV_FAMILY_ID == RP2350_ARM_S_FAMILY_ID + 1, "");
                 uint32_t arm_s_family_id;
                 pico_default_asm_volatile(
-                    "ldr %0, =%1\n" :
-                    "=l" (arm_s_family_id) :
-                    "i" (RP2350_ARM_S_FAMILY_ID)
+                    "ldr %[id_out], =%c[id_const]\n" :
+                    [id_out]  "=l" (arm_s_family_id) :
+                    [id_const] "i" (RP2350_ARM_S_FAMILY_ID)
                 );
                 if (_uf2_info.family_id == arm_s_family_id) {
                     flags |= REBOOT2_FLAG_REBOOT_TO_ARM;

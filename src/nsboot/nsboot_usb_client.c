@@ -451,10 +451,11 @@ bool picoboot_on_stream_chunk(uint32_t chunk_len __comma_removed_for_space(
     bootrom_assert(PICOBOOT, transfer == &_picoboot_stream_transfer.stream);
 #endif
     bootrom_assert(PICOBOOT, chunk_len <= FLASH_PAGE_SIZE);
-    _picoboot_stream_transfer.task.data_length = chunk_len;
-    queue_task(QUEUE_PICOBOOT, &_picoboot_stream_transfer.task, P16_F(atc_chunk_task_done));
+    struct async_task *transfer_task = __get_opaque_ptr(&_picoboot_stream_transfer.task);
+    transfer_task->data_length = chunk_len;
+    queue_task(QUEUE_PICOBOOT, transfer_task, P16_F(atc_chunk_task_done));
     // for subsequent tasks, check the mutation source
-    _picoboot_stream_transfer.task.check_last_mutation_source = true;
+    transfer_task->check_last_mutation_source = true;
     return true;
 }
 

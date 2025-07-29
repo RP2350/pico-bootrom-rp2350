@@ -205,14 +205,15 @@ s_native_step_safe_hx_get_boot_flag_impl:
 .thumb_func
 // args: mpu, buf, mask
 // write (buf & mask) to mpu, whilst saving current value of mpu to buf.
-// return number of bytes copied, xor'd with mask.
+// return a mixin value equal to  0.5 * (BOOTROM_MPU_REGION_COUNT - 1) * BOOTROM_MPU_REGION_COUNT + the sum of all the resulting RLAR registers
 s_varm_swap_mpu_state:
-    push {r1, r4, r5, lr}
+    push {r1, r4, r5, r6, r7, lr}
 #if FEATURE_CANARIES
 .cpu cortex-m33
-    rcp_canary_get ip, CTAG_S_SAVE_CLEAR_AND_DISABLE_MPU
+    rcp_canary_get ip, CTAG_S_SWAP_MPU_STATE
 .cpu cortex-m23
 #endif
+    movs r7, #0
     movs r4, #BOOTROM_MPU_REGION_COUNT - 1
 1:
     // RNR
@@ -223,21 +224,21 @@ s_varm_swap_mpu_state:
     ands r5, r2
     // store saved RLR & mask
     str r5, [r0, #M33_MPU_RLAR_OFFSET - M33_MPU_TYPE_OFFSET]
+    // reload and mix in to our return value
+    ldr r6, [r0, #M33_MPU_RLAR_OFFSET - M33_MPU_TYPE_OFFSET]
+    add r7, r6
+    add r7, r4
     // save old RLAR
     stmia r1!, {r3}
     subs r4, r4, #1
     bpl 1b
-2:
-    ldr r0, [sp]
-    subs r1, r0
-    lsrs r0, r1, #2
-    eors r0, r2
+    mov r0, r7
 #if FEATURE_CANARIES
 .cpu cortex-m33
-    rcp_canary_check ip, CTAG_S_SAVE_CLEAR_AND_DISABLE_MPU
+    rcp_canary_check ip, CTAG_S_SWAP_MPU_STATE
 .cpu cortex-m23
 #endif
-    pop {r1, r4, r5, pc}
+    pop {r1, r4, r5, r6, r7, pc}
 
 // Default XIP setup code. This code is copied into boot RAM by the bootrom
 // before entering user code, and then copied into SRAM before executing. It
@@ -348,12 +349,6 @@ sonly_varm_make_hx_bool_impl:
 // helps keep caller values live in registers instead of spilling to the
 // stack (assuming we annotate correctly)
 
-#define XIP_CACHE_MAINTENANCE_OP_INVALIDATE_BY_SET_WAY 0
-#define XIP_CACHE_MAINTENANCE_OP_CLEAN_BY_SET_WAY 1
-#define XIP_CACHE_MAINTENANCE_OP_INVALIDATE_BY_ADDRESS 2
-#define XIP_CACHE_MAINTENANCE_OP_CLEAN_BY_ADDRESS 3
-#define XIP_CACHE_MAINTENANCE_OP_PIN_AT_ADDRESS 7
-
 .global s_varm_api_crit_flash_flush_cache_impl
 .thumb_func
 s_varm_api_crit_flash_flush_cache_impl:
@@ -387,11 +382,15 @@ _varm_to_native_cache_maintenance:
     varm_hint HINT_MULTIPLEX
 _native_cache_maintenance:
     movw r3, (XIP_SRAM_END - XIP_SRAM_BASE) - 8
+// .p2align 2 // (should already be aligned)
 1:
-    strb r3, [r0, r3]
+.cpu cortex-m33
+    strb r3, [r0], #8
+.cpu cortex-m23
     subs r3, #8
     bcs  1b
 
+    // note ARM caller expects r0 to be XIP_MAINTENANCE_BASE + 0x04000000 + op = 0x1c000000 + op
 .cpu cortex-m33
     rcp_canary_check_nodelay ip, CTAG_S_NATIVE_CRIT_XIP_CACHE_MAINTENANCE
 .cpu cortex-m23

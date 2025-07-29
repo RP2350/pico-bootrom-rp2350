@@ -37,7 +37,7 @@ int __noinline s_varm_flashperm_get_partition_num_from_storage_address(storage_a
     // reading partially populated entries when the table is being appended. Assume that, on
     // append, entries are populated before incrementing the count. (A compiler memory barrier is
     // sufficient here because bootram should be strongly-ordered)
-    const resident_partition_table_t *table = &bootram->always.partition_table;
+    const resident_partition_table_t *table = get_partition_table_ptr();
     uint8_t partition_count = table->permission_partition_count;
     __compiler_memory_barrier();
 
