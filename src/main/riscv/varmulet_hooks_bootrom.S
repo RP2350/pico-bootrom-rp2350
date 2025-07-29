@@ -193,6 +193,23 @@ shared_enable_irqs_and_return:
 1:
     ret
 
+// hoisted to get hint_multiplex word-aligned
+bootrom_wfe:
+    h3.block
+    next_instr_shared_if_smaller
+
+// Multiplexed hints go first through the shared hint table entry, and are then folded back for a
+// second lookup in the extended part of the table, indexed by varm register r3
+hint_multiplex:
+    lw          r_tmp0, CPU_OFFSET_R3(r_cpu)
+#if !BOOTROM_ASSERT_DISABLED
+    li          r_tmp1, NUM_MULTIPLEX
+    bgeu        r_tmp0, r_tmp1, hang
+#endif
+    addi        r_tmp0, r_tmp0, 16
+    // Multiplex hints are an extension to the main table, so offset by the number of base hints:
+    j           _shared_hint_lookup_tail
+
 // Hint instructions (bfx0 encoding space): NOP, YIELD etc. We overload "spare" hint numbers to inject native
 // RISC-V code into the varm context.
 .global bootrom_hint_instr
@@ -215,7 +232,7 @@ hint_table:
     .hword /*a*/ s_native_crit_flash_put_get                                - __opaque_zero_symbol
     .hword /*b*/ s_native_busy_wait_at_least_cycles                         - __opaque_zero_symbol
     .hword /*c*/ s_native_crit_init_default_xip_setup_and_enter_image_thunk - __opaque_zero_symbol
-    .hword /*d*/ s_native_api_validate_ns_buffer                            - __opaque_zero_symbol
+    .hword /*d*/ s_native_validate_ns_buffer_internal                       - __opaque_zero_symbol
     .hword /*e*/ native_memcpy                                              - __opaque_zero_symbol
     .hword /*f*/ native_memset                                              - __opaque_zero_symbol
 multiplex_table:
@@ -263,23 +280,6 @@ _shared_hint_lookup_tail:
     // Lower-numbered hints are just extensions of the emulator, which we
     // enter directly before tailing into the next instruction
     jr          a5
-
-// hoisted to get hint_multiplex word-aligned
-bootrom_wfe:
-    h3.block
-    next_instr_shared_if_smaller
-
-// Multiplexed hints go first through the shared hint table entry, and are then folded back for a
-// second lookup in the extended part of the table, indexed by varm register r3
-hint_multiplex:
-    lw          r_tmp0, CPU_OFFSET_R3(r_cpu)
-#if !BOOTROM_ASSERT_DISABLED
-    li          r_tmp1, NUM_MULTIPLEX
-    bgeu        r_tmp0, r_tmp1, hang
-#endif
-    addi        r_tmp0, r_tmp0, 16
-    // Multiplex hints are an extension to the main table, so offset by the number of base hints:
-    j           _shared_hint_lookup_tail
 
 bootrom_wfi:
     wfi
@@ -418,9 +418,17 @@ bootrom_call_native_and_bx_lr: // function to call is in r_inst (register a5)
     jalr        a5 // r_inst
     // write back result to varm register file
     sw          a0, CPU_OFFSET_R0(r_tmp0)
+    sw          a1, CPU_OFFSET_R1(r_tmp0) // we now support 64 bit returns
     // variant of call_hook_restore_regs_fn0
     mv          r_asm_hooks, r_tmp1
     call_asm_hook_fn_trash_tmp2_work1 VASM_HOOKS_INDEX_RESTORE_REGS_FN
+    // bit of a hack, but because of s_native_validate_ns_buffer_internal
+    // which sets the NZ flags based on a1; we do the same - really
+    // in all other cases, the ARM flags are undefined at this point
+    // or at least not relied upon (after a function call)
+    //
+    // note this is done after restore_regs as that does restore lazy_nz
+    lw          r_lazy_nz, CPU_OFFSET_R1(r_tmp0)
     bnez        r_f0000000, 1f
     li          r_f0000000, 0xf0000000
 #if INVALID_STACK_PTR == 0xf0000000

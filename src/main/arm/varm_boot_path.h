@@ -209,7 +209,7 @@ static_assert(PARSED_PARTITION_TABLE_WORD_SIZE * 4 == sizeof(parsed_partition_ta
 // A parsed_block list holds the best image and/or partition table found by parsing a single block list.
 // neither, either image_def, partition_table or both can be unpopulated, and this same structure
 // is used for convenience even if it could never contain a partition_table (e.g. in a block list found in a partition)
-typedef struct {
+typedef struct parsed_block_loop {
     // if the parsed_block_loop came from flash, this is the offset from the start of flash to the
     // partition or slot the block list started in. for non-flash sources it is 0
     uint32_t flash_start_offset;
@@ -223,6 +223,7 @@ static_assert(sizeof(parsed_image_def_t ) == 88, "");
 static_assert(sizeof(parsed_partition_table_t ) == 64, "");
 static_assert(sizeof(parsed_block_loop_t) == 1180, "");
 static_assert(sizeof(parsed_block_loop_t) == PARSED_BLOCK_LOOP_SIZE, "");
+static_assert(offsetof(parsed_block_loop_t, image_def.rolled_entry_point_addr) == PARSED_BLOCK_LOOP_IMAGE_DEF_ROLLED_ENTRY_POINT_ADDR_OFFSET, "");
 
 // use to check signature of blocks stored in image_def_copies/partition_table_copies below
 typedef struct {
@@ -313,7 +314,7 @@ static __force_inline uint16_t inline_decode_item_size(uint32_t item_header) {
             "bl s_varm_decode_item_size_impl"
             : "+l" (r0)
             :
-            : "ip", "cc"
+            : "ip", "cc", "lr"
             );
     return (uint16_t)r0;
 #endif
@@ -354,7 +355,7 @@ int s_varm_crit_ram_trash_checked_ram_or_flash_window_launch(boot_scan_context_t
 void s_varm_crit_ram_trash_try_otp_boot(mpu_hw_t *mpu_on_arm, boot_scan_context_t *ctx);
 void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_t bootselFlags, uint serial_mode);
 bool s_varm_crit_search_window(const boot_scan_context_t *ctx, uint32_t range_base, uint32_t range_size, parsed_block_loop_t *parsed_block_loop);
-void s_varm_crit_get_non_booting_boot_scan_context(scan_workarea_t *scan_workarea, bool executable_image_def_only, bool verify_image_defs_without_signatures);
+hx_bool s_varm_crit_get_non_booting_boot_scan_context(scan_workarea_t *scan_workarea, bool executable_image_def_only, bool verify_image_defs_without_signatures);
 // note this should not be called for flash images; call the flash specific version which does wome work prior to calling this
 int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, parsed_block_loop_t *parsed_block_loop);
 int s_varm_crit_ram_trash_verify_and_launch_flash_image(boot_scan_context_t *ctx, parsed_block_loop_t *parsed_block_loop);
@@ -469,15 +470,15 @@ static __force_inline bool inline_s_partition_is_marked_bootable(const resident_
     return !(partition->permissions_and_flags & (PICOBIN_PARTITION_FLAGS_IGNORED_DURING_ARM_BOOT_BITS << cpu_type));
 }
 
-static __force_inline void inline_s_set_romdata_ro_xn(mpu_hw_t *mpu_on_arm) {
-    // Symbols from linker script:
-    __unused extern char __start_of_secure_xn_plus_5;
-    mpu_on_arm->rnr = BOOTROM_MPU_REGION_SECURE_XN;
-    static_assert(((2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS) == 5, "");
-//    mpu_on_arm->rbar = (uintptr_t)P16_D(__start_of_secure_xn) | (2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS;
-    mpu_on_arm->rbar = (uintptr_t)P16_D(__start_of_secure_xn_plus_5);
-    mpu_on_arm->rlar = (uintptr_t)BOOTROM_SG_START | M33_MPU_RLAR_EN_BITS;
-}
+// static __force_inline void inline_s_set_romdata_ro_xn(mpu_hw_t *mpu_on_arm) {
+//     // Symbols from linker script:
+//     __unused extern char __start_of_secure_xn_plus_5;
+//     mpu_on_arm->rnr = BOOTROM_MPU_REGION_SECURE_XN;
+//     static_assert(((2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS) == 5, "");
+// //    mpu_on_arm->rbar = (uintptr_t)P16_D(__start_of_secure_xn) | (2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS;
+//     mpu_on_arm->rbar = (uintptr_t)P16_D(__start_of_secure_xn_plus_5);
+//     mpu_on_arm->rlar = (uintptr_t)BOOTROM_SG_START | M33_MPU_RLAR_EN_BITS;
+// }
 
 // Disable writes to the core 1 stack region of boot RAM, which is between
 // core 0 stack and "always" (also disable X permission, but this doesn't matter
@@ -495,14 +496,21 @@ static __force_inline void inline_s_set_core1_ro_xn(mpu_hw_t *mpu_on_arm) {
                         ((2u << M33_MPU_RBAR_AP_LSB) | M33_MPU_RBAR_XN_BITS));
 }
 
-static_assert(BOOTROM_MPU_REGION_RAM == 0, "");
-static_assert(BOOTROM_MPU_REGION_FLASH == 1, "");
-
 static __force_inline void inline_s_update_mpu(mpu_hw_t *mpu_on_arm, bool flash, bool write) {
-    mpu_on_arm->rnr = flash;
+    // note it is tempting to think of the regular RBAR and RLAR as index 0, however it is always selected by
+    // the region number, whereas the aliases uses bit 2 of the region number only
+
+    // for this reason we pick between regions 1 & 2 since these are always in view unless region number > 4
+    static_assert(BOOTROM_MPU_REGION_RAM == 1, "");
+    static_assert(BOOTROM_MPU_REGION_FLASH == 2, "");
+    volatile struct _rbar_rlar {
+        io_rw_32 rbar;
+        io_rw_32 rlar;
+    } *al_regions3 = (volatile struct _rbar_rlar *)(&mpu_on_arm->rbar + 2);
+    // rbar is actually an array of type
     // note 0u is r/w privileged only
     //      2u is r/o privlleged only
-    mpu_on_arm->rbar = (flash ? 0x10000000 : 0x20000000) | ((write?0u:2u) << M33_MPU_RBAR_AP_LSB) | (M33_MPU_RBAR_XN_BITS);
+    al_regions3[flash].rbar = (flash ? 0x10000000 : 0x20000000) | ((write?0u:2u) << M33_MPU_RBAR_AP_LSB) | (M33_MPU_RBAR_XN_BITS);
 }
 
 static __force_inline void inline_s_enable_mpu(mpu_hw_t *mpu_on_arm) {
@@ -604,7 +612,7 @@ void __attribute__((noreturn)) s_arm8_usb_client_ns_call_thunk(uint32_t *secure_
 #define DISABLE_SAU_REGION(num) ({ sau_hw->rnr = (num); sau_hw->rlar = 0; })
 #endif
 
-#define FAKE_MPU_SAU_SIZE 20
+#define FAKE_MPU_SAU_SIZE 20 + 24 // + 24 since we now use the 1,2,3 aliases
 // bit dumpster for RISC-V to avoid PPB accesses: some reserved regs that
 // we know will ignore writes and read back as zero
 // note this is also used on ARM when using parts of the boot path code
@@ -618,6 +626,8 @@ static __force_inline mpu_hw_t *get_fake_mpu_sau(void) {
     static_assert(offsetof(armv8m_sau_hw_t, rnr) < FAKE_MPU_SAU_SIZE, "");
     static_assert(offsetof(armv8m_sau_hw_t, rbar) < FAKE_MPU_SAU_SIZE, "");
     static_assert(offsetof(armv8m_sau_hw_t, rlar) < FAKE_MPU_SAU_SIZE, "");
+    static_assert(M33_MPU_RBAR_A3_OFFSET - M33_MPU_CTRL_OFFSET + offsetof(mpu_hw_t, ctrl) < FAKE_MPU_SAU_SIZE, "");
+    static_assert(M33_MPU_RLAR_A3_OFFSET - M33_MPU_CTRL_OFFSET + offsetof(mpu_hw_t, ctrl) < FAKE_MPU_SAU_SIZE, "");
 
     // save space by using 0; we check on ARM that we're not using the fake_mpu
     // which checks that the first two words are 0x800, and 0x5; which

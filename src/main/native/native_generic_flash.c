@@ -11,8 +11,6 @@
 #include "bootrom.h"
 
 // Sanity check
-#undef static_assert
-#define static_assert(cond, x) extern int __CONCAT(static_assert,__LINE__)[(cond)?1:-1]
 check_hw_layout(qmi_hw_t, direct_csr, QMI_DIRECT_CSR_OFFSET);
 check_hw_layout(qmi_hw_t, direct_tx, QMI_DIRECT_TX_OFFSET);
 
@@ -43,29 +41,38 @@ uint __noinline __attribute__((used)) s_native_crit_flash_put_get(uint cs, const
     bootrom_assert(FLASH, cs == 0 || cs == 1);
     uint32_t csr_toggle_mask = (QMI_DIRECT_CSR_ASSERT_CS0N_BITS | QMI_DIRECT_CSR_EN_BITS) + (cs << QMI_DIRECT_CSR_ASSERT_CS0N_LSB);
 #endif
-    hw_xor_bits(&qmi_hw->direct_csr, csr_toggle_mask);
+    qmi_hw_t *qmi = __get_opaque_ptr(qmi_hw);
+    qmi_hw_t *qmi_xor = hw_xor_alias(qmi);
+    qmi_xor->direct_csr = csr_toggle_mask;
 
     size_t tx_count = count;
     size_t rx_count = count;
-    while (tx_count || rx_count) {
-        uint32_t status = qmi_hw->direct_csr;
-        if (tx_count && !(status & QMI_DIRECT_CSR_TXFULL_BITS)) {
-            qmi_hw->direct_tx = (uint32_t) (tx ? *tx++ : 0);
-            --tx_count;
+    do {
+        uint32_t status = qmi->direct_csr;
+        if (tx_count) {
+            if (!(status & QMI_DIRECT_CSR_TXFULL_BITS)) {
+                qmi->direct_tx = (uint32_t) (tx ? *tx++ : 0);
+                --tx_count;
+            }
+        } else if (!rx_count) {
+            goto done;
         }
-        if (rx_count && !(status & QMI_DIRECT_CSR_RXEMPTY_BITS)) {
-            uint8_t rxbyte = (uint8_t) qmi_hw->direct_rx;
-            if (rx)
-                *rx++ = rxbyte;
-            --rx_count;
+        if (rx_count) {
+            if (!(status & QMI_DIRECT_CSR_RXEMPTY_BITS)) {
+                uint8_t rxbyte = (uint8_t) qmi->direct_rx;
+                if (rx)
+                    *rx++ = rxbyte;
+                --rx_count;
+            }
         }
-    }
+    } while (true);
+    done:
 
     // Wait for BUSY as there may be no RX data at all, e.g. for single-byte SPI commands
-    while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS)
+    while (qmi->direct_csr & QMI_DIRECT_CSR_BUSY_BITS)
         ;
 
     // Disable direct-mode interface and deassert chip select
-    hw_xor_bits(&qmi_hw->direct_csr, csr_toggle_mask);
+    qmi_xor->direct_csr = csr_toggle_mask;
     canary_exit_return(S_NATIVE_CRIT_FLASH_PUT_GET, cs);
 }

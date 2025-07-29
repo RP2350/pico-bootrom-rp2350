@@ -140,5 +140,18 @@ uint32_t s_varm_step_safe_otp_read_rbit3_guarded(uint row);
 int s_varm_api_otp_access(aligned4_uint8_t *buf, uint32_t buf_len, otp_cmd_t cmd);
 int s_varm_api_hx_otp_access(aligned4_uint8_t *buf, uint32_t buf_len, otp_cmd_t cmd, hx_xbool secure);
 
-uint32_t s_otp_advance_bl_to_s_value(uint32_t ignored, uint32_t page);
+// note this returns a value suitable for writing to OTP_SW_LOCK0 which is assumed to ignore everything other than bits 0-3
+static inline uint32_t call_s_otp_advance_bl_to_s_value(uint32_t ignored, uint32_t page) {
+    register uint r0 asm("r0");
+    register uint r1 asm("r1") = page;
+    // r4 is trashed, ip is preserved
+    pico_default_asm_volatile(
+        "movs %0, %2\n"
+        "bl s_otp_advance_bl_to_s_value_trash_r4_preserve_ip\n"
+        : "=l" (r0)
+        : "l" (r1), "i"(ignored)
+        : "cc", "memory", "r2", "r3", "r4", "lr");
+    return r0;
+}
+
 #endif

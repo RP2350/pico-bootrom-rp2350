@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# usage scripts/check_secure_xn build-combined
+
+BUILD_COMBINED_DIR=$1
+ROM_SECURE="$BUILD_COMBINED_DIR/v8m-text.bin"
+ROM_SG="$BUILD_COMBINED_DIR/v8m-secure-gateways.bin"
+ROM="$BUILD_COMBINED_DIR/bootrom-combined.bin"
+ROM_SECURE_SIZE=$(stat -c%s "$ROM_SECURE")
+ROM_SG_SIZE=$(stat -c%s "$ROM_SG")
+ROM_SIZE=$(stat -c%s "$ROM")
+
+if command -v ropper &> /dev/null
+then
+    echo "Checking secure xn for gadgets"
+
+    DIR="$BUILD_COMBINED_DIR/ropper"
+    mkdir -p $DIR
+    dd if=/dev/zero of=$DIR/bootrom-zeros.bin bs=1 count=$(expr $ROM_SIZE - $ROM_SG_SIZE - $ROM_SECURE_SIZE) > /dev/null 2>&1
+    cat $ROM_SECURE $DIR/bootrom-zeros.bin $ROM_SG > $DIR/bootrom-secure-xn.bin
+    ropper -a ARMTHUMB -f $DIR/bootrom-secure-xn.bin 2>/dev/null | grep -v "mcr.*p7" | grep "0x000" | sort
+else
+    echo "Install ropper (pip install ropper) to check secure xn for gadgets"
+fi

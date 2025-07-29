@@ -30,11 +30,11 @@
 // fixed 48 MHz clk_sys -> 8 MHz SCK, the same as RP2040 in BOOTSEL mode.
 #define BOOTROM_SPI_CLKDIV_NSBOOT 6u
 // The first divisor to attempt to use to read flash during flash boot:
-// (-> 50 MHz at max clk_sys of 150 MHz, ~4 MHz at expected ROSC freq)
+// (-> 50 MHz at max clk_sys of 150 MHz, ~16 MHz at expected ROSC freq)
 #define BOOTROM_SPI_CLKDIV_FLASH_BOOT_MIN 3u
 // After trying all modes, flash boot will fall back to progressively slower
 // divisors (doubling each time) up to this maximum:
-// (->  6.25 MHz at max clk_sys, snail's pace at expected ROSC boot freq)
+// (->  6.25 MHz at max clk_sys, ~2 MHz at expected ROSC boot freq)
 #define BOOTROM_SPI_CLKDIV_FLASH_BOOT_MAX 24u
 
 #define NUM_FLASH_BOOT_CLOCK_DIVS 4
@@ -102,18 +102,18 @@ static __force_inline uint32_t s_varm_flash_devinfo_get_size(uint cs) {
 	);
 	uint32_t mask = OTP_DATA_FLASH_DEVINFO_CS0_SIZE_BITS >> OTP_DATA_FLASH_DEVINFO_CS0_SIZE_LSB;
 	// Calculate based on the cached devinfo which was read out during early boot
-	uint size_bits = (bootram->always.zero_init.flash_devinfo >> shamt) & mask;
+	uint size_bits = (gcc_avoid_single_movw_plus_ldr(bootram->always.zero_init.flash_devinfo) >> shamt) & mask;
 	// Encoded as log2(4k sector count):
 	return size_bits == 0u ? 0u : (0x1000u << size_bits);
 }
 
 static __force_inline bool s_varm_flash_devinfo_get_d8h_supported(void) {
-	return bootram->always.zero_init.flash_devinfo & OTP_DATA_FLASH_DEVINFO_D8H_ERASE_SUPPORTED_BITS;
+	return gcc_avoid_single_movw_plus_ldr(bootram->always.zero_init.flash_devinfo) & OTP_DATA_FLASH_DEVINFO_D8H_ERASE_SUPPORTED_BITS;
 }
 
 // Return -1 if no CS1 device, otherwise return GPIO number
 static __force_inline int inline_s_varm_flash_devinfo_get_cs1_gpio(void) {
-	uint16_t devinfo = bootram->always.zero_init.flash_devinfo;
+	uint16_t devinfo = gcc_avoid_single_movw_plus_ldr(bootram->always.zero_init.flash_devinfo);
 	if ((devinfo & OTP_DATA_FLASH_DEVINFO_CS1_SIZE_BITS) == 0) {
 		return -1;
 	} else {

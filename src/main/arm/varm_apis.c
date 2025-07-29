@@ -44,14 +44,38 @@ static __force_inline uint inline_picoboot_reboot2_cmd_reboot_type(uint32_t flag
     return flags & REBOOT2_TYPE_MASK;
 }
 
+// note flags has the reboot_type increased by 1
 int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_ms, uint32_t p0, uint32_t p1, uint32_t flags2) {
     canary_entry(S_VARM_API_REBOOT);
     int rc;
 #if !SILICON_BUILD
     if (varm_running_in_sim()) delay_ms = 1;
 #endif
-    hx_assert_equal2i(flags, flags2);
     check_hw_layout(watchdog_hw_t, scratch[7], WATCHDOG_SCRATCH7_OFFSET);
+    register uint pc asm("r4"); // we want to keep this live thru the whole function;
+#if ASM_SIZE_HACKS
+    uintptr_t psm_base = __get_opaque_value(PSM_BASE);
+    // what do you know !!?
+    static_assert((uint32_t)(PSM_BASE | (PSM_BASE << 3)) == WATCHDOG_BASE + WATCHDOG_CTRL_OFFSET, "");
+    uint32_t wctrl = psm_base | (psm_base << 3);
+    // Disable watchdog before configuring, and clear PAUSE bits to ensure we
+    // reboot even under debugger:
+
+    // note we use pc variable as the value, as we will set it to 0 and then -2 which are both invalid
+    // watchdog boot PC values if someone tries to reboot (will cause a no-thumb-bit fault after reboot)
+    pico_default_asm_volatile(
+        "movs %0, #0\n"
+        : "=l" (pc)
+        : : "cc"
+    );
+    *(io_rw_32 *)wctrl = pc;
+    // Configure PSM to perform a full reset on watchdog trigger, except for
+    // the processor cold reset domain (the first PSM stage) which includes
+    // things like the Arm debug halt-on-reset bits.
+    static_assert((~PSM_WDSEL_PROC_COLD_BITS) == (uint32_t)-2, "");
+    pc -= 2;
+    ((io_rw_32 *)psm_base)[PSM_WDSEL_OFFSET/4] = pc;
+#else
     // Disable watchdog before configuring, and clear PAUSE bits to ensure we
     // reboot even under debugger:
     watchdog_hw->ctrl = 0;
@@ -59,15 +83,92 @@ int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_m
     // the processor cold reset domain (the first PSM stage) which includes
     // things like the Arm debug halt-on-reset bits.
     psm_hw->wdsel = ~PSM_WDSEL_PROC_COLD_BITS;
+    pc = 0;
+#endif
 
-    uint reboot_type = inline_picoboot_reboot2_cmd_reboot_type(flags);
-    if (reboot_type != REBOOT2_FLAG_REBOOT_TYPE_PC_SP) {
+    // use r0, r1 since we want these to be the args to make_hx_bool2_u below (these are the actual
+    // values for rebot_type == PC_SP which should pass (0,0) to that function
+    register uint reboot_type_plus_1_minus_pc_sp asm ("r0") = flags;
+    register uint reboot_type_plus_1_minus_pc_sp2 asm ("r1") = flags2;
+    rcp_iequal_nodelay(reboot_type_plus_1_minus_pc_sp, reboot_type_plus_1_minus_pc_sp2);
+    uint reboot_type_plus_one;
+    // just check that our separate SUBs below aren't repeated
+    static_assert((REBOOT2_FLAG_REBOOT_TYPE_PC_SP) -5 != 5, "");
+    static_assert((REBOOT2_FLAG_REBOOT_TYPE_PC_SP) -5 != 7, "");
+    // we wnat to do an actual subtraction from 13, rather than a RSB which could be trivially skipped
+    pico_default_asm_volatile(
+            "subs %0, #%c[TYPE_PC_SP]- 5\n" // split sub over two instructions to make skipping harder
+            "subs %0, #5\n"
+            "subs %1, #%c[TYPE_PC_SP] - 7\n" // split sub over two instructions and combine with using two different subs above
+            "lsls %0, #28\n"
+            "subs %1, #7\n"
+            "lsrs %0, #28\n"
+            "lsls %1, #28\n"
+            "lsls %[pc], %[flags], #28\n" // pc was 0xfffffffe, so if this is not skipped pc will definitely be even, if skipped then...
+            "lsrs %1, #28\n"
+            "lsrs %[reboot_type_plus_one], %[pc], #28\n" // ... this would be 0xf
+            : "+l" (reboot_type_plus_1_minus_pc_sp),
+              "+l" (reboot_type_plus_1_minus_pc_sp2),
+              [reboot_type_plus_one] "=l" (reboot_type_plus_one),
+              [pc] "+l" (pc)
+            : [flags] "r" (flags), [flags2] "r" (flags2), [TYPE_PC_SP] "i" (REBOOT2_FLAG_REBOOT_TYPE_PC_SP)
+            : "cc"
+            );
+    // check reboot type is valid
+    uint t1;
+    pico_default_asm_volatile_goto(
+        // we OR 0x8000 in since reboot_type_plus_one is actually modulo 16 .. this means that the result of the shift should never be zero
+        "movw %[tmp], #%c[BITS] | 0x8000\n"
+        "lsrs %[tmp], %[reboot_type_plus_one]\n"
+        // C == 0 or Z == 1
+        "bls %l[reboot_return_not_permitted]\n"
+        : [tmp] "=l" (t1)
+        : [reboot_type_plus_one] "l" (reboot_type_plus_one),
+          [BITS] "i" ((1u << REBOOT2_FLAG_REBOOT_TYPE_PC_SP) |
+                      (1u << REBOOT2_FLAG_REBOOT_TYPE_NORMAL) |
+                      (1u << REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL) |
+                      (1u << REBOOT2_FLAG_REBOOT_TYPE_RAM_IMAGE) |
+                      (1u << REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE))
+        : "cc"
+        : reboot_return_not_permitted
+    );
+    uint32_t magic;
+    // keep pc alive from above, and make magic non const to compiler.
+    // we also deliberately do two loads
+    pico_default_asm_volatile(
+        "ldr %0, =%c2\n"
+        "ldr %1, =%c2\n"
+        : "+l" (pc), "=l" (magic)
+        : "i" (REBOOT_TO_MAGIC_PC)
+        );
+    // double check it got set correctly
+    rcp_iequal_nodelay(pc, magic);
+    // we are trashing pc again, but pc should be between -15 and 15 certainly, so not helpful to an attacker
+    if (reboot_type_plus_1_minus_pc_sp != 1) {
+        // reboot_type != TYPE_PC_SP, so we continue with magic PC
         watchdog_hw->scratch[2] = p0;
         watchdog_hw->scratch[3] = p1;
-        p0 = REBOOT_TO_MAGIC_PC;
-        p1 = reboot_type;
-    }
+        p1 = reboot_type_plus_one - 1;
+        reboot_type_plus_1_minus_pc_sp = __get_opaque_value(reboot_type_plus_1_minus_pc_sp) != 1;
+        reboot_type_plus_1_minus_pc_sp2 = !!pc;
+    } else {
+        // reboot_type == TYPE_PC_SP, so we want the real PC (SP remains in p1)
+        //
+        // if we were glitched to here, somehow we expect that at least one of
+        // rt_minus_pc_sp or rt_minus_pc_sp2 is not zero (which will break the not_ok check)
 
+        pc = reboot_type_plus_1_minus_pc_sp2 - 1;
+        rcp_iequal_nodelay(pc, 0);
+        pc |= p0; // ... so this is an assign to pc as pc should be 0 from above assignment
+    }
+    // make the compiler think we are still using p0 so it doesn't share a register with pc
+    pico_default_asm_volatile(
+            "\n"
+            : "+r" (p0) : : "memory"
+    );
+    // only place we set a valid value for not_ok, so can't skip this without skipping check below
+    hx_bool ok = make_hx_bool2_u(reboot_type_plus_1_minus_pc_sp, reboot_type_plus_1_minus_pc_sp2);
+    hx_assert_true(ok);
     //    printf("reboot flags %02x\n", reboot_cmd->bFlags);
     if (flags & (REBOOT2_FLAG_REBOOT_TO_ARM | REBOOT2_FLAG_REBOOT_TO_RISCV)) {
         uint archsel_request = (flags & REBOOT2_FLAG_REBOOT_TO_RISCV) ? OTP_ARCHSEL_BITS : 0;
@@ -77,27 +178,35 @@ int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_m
         if (otp_hw->archsel != archsel_request) {
             printf("Can't reboot with requested ARCHSEL: not available, due to OTP\n");
             // NO_RETURN does not apply, as the reboot failed.
+            reboot_return_not_permitted:
             rc = BOOTROM_ERROR_NOT_PERMITTED;
             goto reboot_return;
         }
     }
-    if (reboot_type == REBOOT2_FLAG_REBOOT_TYPE_NORMAL) {
-#if MINI_PRINTF
+    watchdog_hw->scratch[4] = 0;
+    if (reboot_type_plus_one == REBOOT2_FLAG_REBOOT_TYPE_NORMAL + 1) {
         printf("WATCHDOG REBOOT regular\n");
-#endif
-        bootram->always.diagnostic_partition_index = (int8_t)watchdog_hw->scratch[2];
+        gcc_avoid_single_movw_plus_ldr(bootram->always.diagnostic_partition_index) = (int8_t)watchdog_hw->scratch[2];
         printf("SETTING DIAGNOSTIC PARTITION TO %d\n", (int8_t)watchdog_hw->scratch[2]);
-        watchdog_hw->scratch[4] = 0;
     } else {
-#if MINI_PRINTF
-        printf("WATCHDOG REBOOT %d %08x %08x %d\n", reboot_type, (int)p0, (int)p1, (int)delay_ms);
-        mini_printf_flush();
-#endif
-        watchdog_hw->scratch[4] = VECTORED_BOOT_MAGIC;
-        watchdog_hw->scratch[5] = p0 ^ -watchdog_hw->scratch[4];
+        printf("WATCHDOG REBOOT %d %08x %08x %d\n", reboot_type_plus_one - 1, (int)pc, (int)p1, (int)delay_ms);
+        uint32_t tmp;
+        // use assembly to load constant, otherwise GCC does not share the literal pool entry with asm above
+        // which uses REBOOT_TO_MAGIC_PC (the same values as VECTORED_BOOT_MAGIC)
+        pico_default_asm_volatile(
+            "ldr %0, =%c1\n"
+            : "=r" (tmp)
+            : "i" (VECTORED_BOOT_MAGIC)
+            );
         watchdog_hw->scratch[6] = p1;
-        watchdog_hw->scratch[7] = p0;
+        watchdog_hw->scratch[7] = pc;
+        hx_assert_true(ok);
+        watchdog_hw->scratch[4] = tmp;
+        watchdog_hw->scratch[5] = pc ^ -tmp;
     }
+#if MINI_PRINTF
+    mini_printf_flush();
+#endif
     watchdog_hw->load = delay_ms * 1000u;
 
     // Make sure watchdog tick is running. If not, we probably got here from a
@@ -112,11 +221,17 @@ int __exported_from_arm __used s_varm_hx_reboot(uint32_t flags, uint32_t delay_m
     // generators. Since we are using the watchdog timer mode only (not immediate trigger) there
     // should always be sufficient delay between the clock switch and the watchdog triggering
     // (minimum: approx 5 cycles of clk_ref)
-    hw_set_bits(&syscfg_hw->auxctrl, 0x01);
+    uint32_t one = __get_opaque_value(0x01u);
+    hw_set_bits(&syscfg_hw->auxctrl, one);
     // Actually start counting down for the reset:
-    watchdog_hw->ctrl = WATCHDOG_CTRL_ENABLE_BITS;
+    static_assert(WATCHDOG_CTRL_ENABLE_BITS == (1u << WATCHDOG_CTRL_ENABLE_LSB), "");
+    watchdog_hw->ctrl = one << WATCHDOG_CTRL_ENABLE_LSB;
 
-    while (flags & REBOOT2_FLAG_NO_RETURN_ON_SUCCESS) __wfi();
+    if (flags & REBOOT2_FLAG_NO_RETURN_ON_SUCCESS) {
+        loop:
+        __wfi();
+        goto loop;
+    }
     rc = BOOTROM_OK;
     reboot_return:
     canary_exit_return(S_VARM_API_REBOOT, rc);
@@ -146,7 +261,7 @@ int __exported_from_arm s_varm_api_get_sys_info(uint32_t *out_buffer, uint32_t o
         "beq 1f\n"
         "movs %[dest_index], %[bad_alignment]\n"
         "b.n %l[return_minus_dest_index]\n"
-        "1:"
+        "1:\n"
         : [dest_index] "=l" (dest_index)
         : [out_buffer] "l" (out_buffer), [bad_alignment] "i" (-BOOTROM_ERROR_BAD_ALIGNMENT)
         : "cc"
@@ -165,17 +280,17 @@ int __exported_from_arm s_varm_api_get_sys_info(uint32_t *out_buffer, uint32_t o
     lens32[1] = 0x0;
     lens32[2] = 0x0;
 
-    uint output_count = 1;
+    uint32_t *output_ptr = outputs + 1;
     typeof(bootram->always) *always = __get_opaque_ptr(&bootram->always);
     if (flags & SYS_INFO_CHIP_INFO) {
         // first three counts are 1 (returned flags), 1 (package sel), 2 (chip id)
         lens32[0] = 0x10000;
-        outputs[output_count++] = SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET;
-        outputs[output_count++] = (uintptr_t)&always->chip_id;
+        *output_ptr++ = SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET;
+        *output_ptr++ = (uintptr_t)&always->chip_id;
     }
     io_ro_32 *otp_critical = __get_opaque_ptr(&otp_hw->critical);
     if (flags & SYS_INFO_CRITICAL) {
-        outputs[output_count++] = (uintptr_t)otp_critical;
+        *output_ptr++ = (uintptr_t)otp_critical;
     }
     uint32_t cpu_info;
     uint32_t flash_dev_info;
@@ -187,31 +302,34 @@ int __exported_from_arm s_varm_api_get_sys_info(uint32_t *out_buffer, uint32_t o
         static_assert(OTP_ARCHSEL_CORE0_BITS == 1, "");
         static_assert(OTP_ARCHSEL_CORE1_BITS == 2, "");
         cpu_info = (archsel_bits >> get_core_num()) & 1;
-        outputs[output_count++] = (uintptr_t)&cpu_info;
+        *output_ptr++ = (uintptr_t)&cpu_info;
     }
     if (flags & SYS_INFO_FLASH_DEV_INFO) {
         flash_dev_info = always->zero_init.flash_devinfo;
-        outputs[output_count++] = (uintptr_t)&flash_dev_info;
+        *output_ptr++ = (uintptr_t)&flash_dev_info;
     }
     if (flags & SYS_INFO_BOOT_RANDOM) {
+        uint output_count = (uint)(output_ptr - outputs);
         lens[output_count] = 3;
-        outputs[output_count++] = (uintptr_t)&always->boot_random;
+        *output_ptr++ = (uintptr_t)&always->boot_random;
     }
 #if FEATURE_EXEC2
     if (flags & SYS_INFO_NONCE) {
         lens[output_count] = 1;
-        outputs[output_count++] = (uintptr_t)&always->nonce;
+        *output_ptr++ = (uintptr_t)&always->nonce;
     }
 #endif
     if (flags & SYS_INFO_BOOT_INFO) {
+        uint output_count = (uint)(output_ptr - outputs);
+        *output_ptr++ = (uintptr_t)&always->boot_type_and_diagnostics;
+        *output_ptr++ = (uintptr_t)&always->zero_init.reboot_params;
         lens[output_count] = 1;
-        outputs[output_count++] = (uintptr_t)&always->boot_type_and_diagnostics;
-        lens[output_count] = 1;
-        outputs[output_count++] = (uintptr_t)&always->zero_init.reboot_params;
+        lens[output_count+1] = 1;
     }
+    dest_index = 0;
+    uint output_count = (uint)(output_ptr - outputs);
     // helpful assert in case you add more
     bootrom_assert(MISC, output_count <= count_of(outputs));
-    dest_index = 0;
     for(uint i=0;i<output_count;i++) {
         uint len = lens[i] + 1;
         if (dest_index + len > out_buffer_word_size) {
@@ -355,9 +473,11 @@ bootrom_api_callback_generic_t __exported_from_arm s_varm_api_set_rom_callback(u
         old = (bootrom_api_callback_generic_t)BOOTROM_ERROR_INVALID_ARG;
         goto set_rom_callback_done;
     }
-    old = bootram->always.callbacks[callback_num];
+    // for some reason GCC wants to base off of bootram ptr without this
+    bootrom_api_callback_generic_t *slot = __get_opaque_ptr(&bootram->always.callbacks[callback_num]);
+    old = *slot;
     if ((intptr_t)funcptr >= 0) {
-        bootram->always.callbacks[callback_num] = funcptr;
+        *slot = funcptr;
     }
     set_rom_callback_done:
     canary_exit_return(S_VARM_API_SET_ROM_CALLBACK, old);
@@ -502,13 +622,13 @@ int s_varm_crit_get_pt_partition_info(uint32_t *out_buffer, uint32_t out_buffer_
             }
             printf(" %08x->%08x", inline_s_partition_start_offset(&partition),
                    inline_s_partition_end_offset(&partition));
-            if ((partition.location_and_permissions ^ partition.flags_and_permissions) &
+            if ((partition.permissions_and_location ^ partition.permissions_and_flags) &
                 PICOBIN_PARTITION_PERMISSIONS_BITS) {
                 printf(" (PERMISSION MISMATCH)\n");
                 dest_index = (uint32_t)BOOTROM_ERROR_INVALID_DATA;
                 goto done;
             }
-            uint p = partition.location_and_permissions & partition.flags_and_permissions;
+            uint p = partition.permissions_and_location & partition.permissions_and_flags;
             print_partition_permissions(p);
 #endif
             if (partition.permissions_and_flags & PICOBIN_PARTITION_FLAGS_HAS_ID_BITS) {
@@ -531,7 +651,7 @@ int s_varm_crit_get_pt_partition_info(uint32_t *out_buffer, uint32_t out_buffer_
             // (note this code is a bit weird to save space)
             uint middle = item_pos + num_extra_families;
 #if MINI_PRINTF
-            print_partition_default_families(partition.flags_and_permissions);
+            print_partition_default_families(partition.permissions_and_flags);
             for(uint ip = item_pos; ip < middle; ip++) {
                  printf(" %08x,", pt_item_data[ip]);
                  if (ip != middle - 1) {
@@ -586,10 +706,11 @@ int s_varm_crit_get_pt_partition_info(uint32_t *out_buffer, uint32_t out_buffer_
         sb_sw_message_digest_t digest;
         sb_sha256_finish(&sha256, digest.bytes);
         static_assert(PARTITION_TABLE_SHA256_HASH_WORDS == 1, ""); // i think one is sufficient
+        uint32_t *pt_hash = __get_opaque_ptr(&bootram->always.partition_table.hash[0]);
         if (first_load_from_buffer) {
-            bootram->always.partition_table.hash[0] = digest.words[0];
+            pt_hash[0] = digest.words[0];
         } else {
-            if (bootram->always.partition_table.hash[0] != digest.words[0]) {
+            if (pt_hash[0] != digest.words[0]) {
                 printf("PT hash does not match that which was loaded originally\n");
                 dest_index = (uint32_t)BOOTROM_ERROR_MODIFIED_DATA;
             }

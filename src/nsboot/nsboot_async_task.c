@@ -121,6 +121,7 @@ static uint32_t _execute_task(struct async_task *task) {
     }
     uint type = task->type;
     if (type & AT_MASKABLE_EXIT_XIP) {
+        type -= AT_MASKABLE_EXIT_XIP;
         _do_flash_exit_xip();
     }
     int ret = PICOBOOT_OK;

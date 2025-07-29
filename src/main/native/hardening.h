@@ -358,8 +358,8 @@ static __force_inline hx_bool make_hx_bool2(bool value1, bool value2) {
     register uint32_t r1 asm ("r1") = value2;
     pico_default_asm(
             "bl sonly_varm_make_hx_bool_impl"
-            : "+l" (r0)
-            : "l" (r1)
+            : "+l" (r0), "+l" (r1)
+            :
             : "ip", "lr", "cc"
             );
     hx_bool rc = { r0 };
@@ -371,8 +371,8 @@ static __force_inline hx_bool make_hx_bool2_u(uint32_t value1, uint32_t value2) 
     register uint32_t r1 asm ("r1") = value2;
     pico_default_asm(
     "bl sonly_varm_make_hx_bool_impl"
-    : "+l" (r0)
-    : "l" (r1)
+    : "+l" (r0), "+l" (r1)
+    :
     : "ip", "lr", "cc"
     );
     hx_bool rc = { r0 };
@@ -384,8 +384,8 @@ static __force_inline hx_bool make_hx_bool(bool value) {
     register uint32_t r1 asm ("r1") = value;
     pico_default_asm(
             "bl sonly_varm_make_hx_bool_impl"
-    : "+l" (r0)
-    : "l" (r1)
+    : "+l" (r0), "+l" (r1)
+    :
     : "ip", "lr", "cc"
     );
     hx_bool rc = { r0 };
@@ -395,13 +395,28 @@ static __force_inline hx_bool make_hx_bool(bool value) {
 static __force_inline hx_xbool make_hx_xbool2(bool value1, bool value2, uint32_t xor) {
     register uint32_t r0 asm ("r0") = value1;
     register uint32_t r1 asm ("r1") = value2;
+    hx_xbool rc = {xor};
     pico_default_asm(
-            "bl sonly_varm_make_hx_bool_impl"
-    : "+l" (r0)
-    : "l" (r1)
+            "bl sonly_varm_make_hx_bool_impl\n"
+            "eors %1, r0\n"
+    : "+l" (r0), "+l" (rc.v), "+l" (r1)
+    :
     : "ip", "lr", "cc"
     );
-    hx_xbool rc = { r0 ^ xor };
+    return rc;
+}
+
+static __force_inline hx_xbool make_hx_xbool2_u(uint32_t value1, uint32_t value2, uint32_t xor) {
+    register uint32_t r0 asm ("r0") = value1;
+    register uint32_t r1 asm ("r1") = value2;
+    hx_xbool rc = {xor};
+    pico_default_asm(
+        "bl sonly_varm_make_hx_bool_impl\n"
+        "eors %1, r0\n"
+    : "+l" (r0), "+l" (rc.v), "+l" (r1)
+    :
+    : "ip", "lr", "cc"
+    );
     return rc;
 }
 
@@ -472,6 +487,11 @@ static __force_inline void hx_assert_or(hx_bool a, hx_bool b) {
     rcp_b2or(a.v, b.v);
 }
 
+static __force_inline void hx_assert_or_dup(hx_bool a, hx_bool b) {
+    rcp_b2or(a.v, b.v);
+    rcp_b2or(a.v, b.v);
+}
+
 static __force_inline void hx_assert_and(hx_bool a, hx_bool b) {
     rcp_b2and(a.v, b.v);
 }
@@ -482,80 +502,182 @@ static __force_inline void hx_assert_bequal(hx_bool a, hx_bool b) {
     rcp_iequal(a.v, b.v);
 }
 
+static __force_inline void hx_assert_bequal_dup(hx_bool a, hx_bool b) {
+    bootrom_assert(MISC, (a.v ^ b.v) == 0 && (a.v == HX_BIT_PATTERN_TRUE || a.v == HX_BIT_PATTERN_FALSE));
+    hx_check_bools(a, b);
+    rcp_iequal(a.v, b.v);
+    rcp_iequal(b.v, a.v);
+}
+
+
 static __force_inline hx_bool hx_not(hx_bool v) {
-    hx_bool rc = { v.v ^ (hx_bit_pattern_not()) };
+    hx_bool rc = { hx_bit_pattern_not() };
+    // make sure we EOR into the invalid bit pattern
+    pico_default_asm_volatile(
+        "eors %0, %1\n"
+        : "+l" (rc.v)
+        : "l" (v.v)
+        : "cc"
+    );
     return rc;
 }
 
 static __force_inline hx_bool hx_notx(hx_xbool v, uint32_t xor) {
-    hx_bool rc = { v.v ^ (HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ xor) };
+    hx_bool rc = { hx_bit_pattern_not() ^ xor };
+    // make sure we EOR into the invalid bit pattern
+    pico_default_asm_volatile(
+        "eors %0, %1\n"
+        : "+l" (rc.v)
+        : "l" (v.v)
+        : "cc"
+    );
     return rc;
 }
 
 // same as hx_notx but useful to save code space if xor and base_xor result in close (-128 -> +127) NOT constantw
 static __force_inline hx_bool hx_notx_constant_diff(hx_xbool v, uint32_t xor, uint32_t base_xor) {
-    hx_bool rc = { v.v ^ (__get_opaque_value(HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ base_xor) +
+    hx_bool rc = { (__get_opaque_value(HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ base_xor) +
                     ((HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ xor) -
                      (HX_BIT_PATTERN_TRUE ^ HX_BIT_PATTERN_FALSE ^ base_xor)))
     };
+    // make sure we EOR into the invalid bit pattern
+    pico_default_asm_volatile(
+        "eors %0, %1\n"
+        : "+l" (rc.v)
+        : "l" (v.v)
+        : "cc"
+    );
     return rc;
 }
 
 
 static __force_inline hx_bool hx_not_checked(hx_bool v) {
     hx_check_bool(v);
-    hx_bool rc = { v.v ^ (hx_bit_pattern_not()) };
+    hx_bool rc = { hx_bit_pattern_not() };
+    // make sure we EOR into the invalid bit pattern
+    pico_default_asm_volatile(
+        "eors %0, %1\n"
+        : "+l" (rc.v)
+        : "l" (v.v)
+        : "cc"
+    );
     return rc;
 }
 
 static __force_inline hx_bool hx_and_notb(hx_bool a, bool b) {
-     if (b) a = hx_false();
-     return a;
+    pico_default_asm(
+        "orrs %0, %1\n"
+        "lsls %1, #31\n"
+        "adds %1, %0\n"
+        "bcc 1f\n"
+        "adds %0, %[delta]\n"
+        "1:\n"
+        : "+l" (a.v), "+l" (b)
+        : [delta] "r" (HX_BIT_PATTERN_FALSE - HX_BIT_PATTERN_TRUE - 1)
+        : "cc"
+    );
+    return a;
 }
 
-static __force_inline void hx_assert_notx_orx_true(hx_xbool a, uint32_t a_xor, hx_xbool b, uint32_t b_xor) {
-    a.v ^= a_xor ^ HX_BIT_PATTERN_FALSE ^ HX_BIT_PATTERN_TRUE;
-    b.v ^= b_xor;
-    rcp_b2or(a.v, b.v);
-}
-
-static __force_inline hx_bool hx_and(hx_bool a, hx_bool b) {
-    hx_bool rc;
-    rc.v = a.v & b.v;
-    // little extra check
-    if (rc.v) rc.v |= a.v | b.v;
+static __force_inline hx_bool hx_xbool_to_bool(hx_xbool b, uint32_t xor) {
+    hx_bool rc = {xor};
+    pico_default_asm_volatile(
+        "eors %0, %1\n"
+        : "+l" (rc.v)
+        : "l" (b.v)
+        : "cc"
+    );
     return rc;
 }
+
+static __force_inline hx_bool hx_xbool_to_bool_checked(hx_xbool b, uint32_t xor) {
+    rcp_bxorvalid(b.v, xor);
+    return hx_xbool_to_bool(b, xor);
+}
+
+static __force_inline void hx_assert_notx_orx_true_dup_checked(hx_xbool a, uint32_t a_xor, hx_xbool b, uint32_t b_xor) {
+    hx_bool b0 = hx_xbool_to_bool_checked(b, b_xor);
+    if (hx_is_false(b0)) {
+        b0 = hx_not(hx_xbool_to_bool_checked(a, a_xor));
+    }
+    hx_assert_true(b0);
+    hx_assert_true(b0);
+}
+
+// this is not correct
+// static __force_inline hx_bool hx_and(hx_bool a, hx_bool b) {
+//     hx_bool rc;
+//     rc.v = a.v & b.v;
+//     // little extra check
+//     if (rc.v) rc.v |= a.v | b.v;
+//     return rc;
+// }
 
 static __force_inline hx_bool hx_or(hx_bool a, hx_bool b) {
     // assume we check this later... if it was invalid before, it is invalid after
-    // deliberate | to cause check off both
-    hx_bool rc = make_hx_bool(hx_is_true(a) || hx_is_true(b));
+    pico_default_asm(
+        "ands %0, %1\n"
+        "bne 1f\n"
+        "mov.w %1, %[_HX_BIT_PATTERN_TRUE]\n"
+        "adds %0, %1\n"
+        "1:\n"
+        : "+l" (a.v)
+        : "l" (b.v), [_HX_BIT_PATTERN_TRUE] "i" (HX_BIT_PATTERN_TRUE)
+        : "cc"
+    );
+    return a;
+}
+
+static __force_inline hx_bool hx_or_prefer_true(hx_bool a, hx_bool b) {
+    // assume we check this later... if it was invalid before, it is invalid after
+    hx_bool rc = hx_true();
+    pico_default_asm(
+        "ands %[a], %[b]\n"
+        "beq 1f\n"
+        // a & b are the same
+        "mov %[rc], %[a]\n"
+        "1:\n"
+        : [a] "+l" (a.v), [rc] "+l" (rc.v)
+        : [b] "l" (b.v)
+        : "cc"
+    );
     return rc;
 }
 
-static __force_inline hx_bool hx_or_checked(hx_bool a, hx_bool b) {
-    hx_check_bools(a, b);
-    // assume we check this later... if it was invalid before, it is invalid after
-    // deliberate | to cause check off both
-    hx_bool rc = make_hx_bool(hx_is_true(a) || hx_is_true(b));
+static __force_inline hx_bool hx_nor_checked(hx_bool a, hx_bool b) {
+    hx_bool rc = { hx_bit_pattern_not() };
+    pico_default_asm(
+        ".cpu cortex-m33\n"
+        "mcrr2 p7, #0, %[a], %[b], c8\n" // b2valid_nodelay in here because GCC was loading a & b twice from stack
+        ".cpu cortex-m23\n"
+        "ands %[a], %[b]\n"
+        "bne 1f\n"
+        // a & b are different
+        "mov.w %[b], %[_HX_BIT_PATTERN_TRUE]\n"
+        "adds %[a], %[b]\n"
+        "1:\n"
+        "eors %[rc], %[a]\n"
+        : [a] "+l" (a.v), [rc] "+l" (rc.v)
+        : [b] "l" (b.v), [_HX_BIT_PATTERN_TRUE] "i" (HX_BIT_PATTERN_TRUE)
+        : "cc"
+    );
     return rc;
 }
 
 static __force_inline hx_bool hx_and_checked(hx_bool a, hx_bool b) {
     hx_check_bools(a, b);
-    hx_bool rc = { a.v & b.v };
-    if (!rc.v) rc.v = hx_bit_pattern_false();
-    return rc;
-}
-
-static __force_inline hx_bool hx_and_not_checked(hx_bool a, hx_bool b) {
-    // assume we check this later... if it was invalid before, it is invalid after
-    // deliberate & to cause check off both
-    //hx_bool rc = make_hx_bool(hx_is_true(a) & hx_is_true(b));
-    hx_check_bools(a, b);
-    hx_bool rc = { a.v & (b.v ^ hx_bit_pattern_not()) };
-    if (!rc.v) rc.v = hx_bit_pattern_false();
+    hx_bool rc;
+    pico_default_asm_volatile(
+        "ands %[a], %[b]\n"
+        "movs %[rc], %[a]\n"
+        "ands %[rc], %[b]\n"
+        "bne 1f\n"
+        "mov.w %[rc], %[_HX_BIT_PATTERN_FALSE]\n"
+        "1:\n"
+        : [rc] "=&l" (rc.v), [a] "+l" (a.v)
+        : [b] "l" (b.v), [_HX_BIT_PATTERN_FALSE] "i" (HX_BIT_PATTERN_FALSE)
+        : "cc"
+        );
     return rc;
 }
 
@@ -575,6 +697,18 @@ static __force_inline void hx_assert_equal2i(uint32_t a, uint32_t b) {
 
 static __force_inline hx_uint32_t make_hx_uint32(uint32_t value) { hx_uint32_t rc = { value, value ^ hx_bit_pattern_xor()}; return rc; }
 static __force_inline hx_uint32_t make_hx_uint32_2(uint32_t value1, uint32_t value2) { hx_uint32_t rc = { value1, value2 ^ hx_bit_pattern_xor()}; return rc; }
+static __force_inline hx_uint32_t make_hx_uint32_minus1_m33(void) {
+    hx_uint32_t rc;
+    pico_default_asm(
+        ".cpu cortex-m33\n"
+        "mvns %0, #1\n"
+        "eors %1, %2\n"
+        ".cpu cortex-m23\n"
+        : "=l" (rc.v), "=l" (rc.p)
+        : "i" (HX_UINT32_XOR)
+        );
+    return rc;
+}
 static __force_inline void hx_check_uint32(hx_uint32_t v) {
     rcp_ivalid(v.v, v.p);
 }
@@ -606,17 +740,6 @@ static __force_inline hx_bool hx_b_from_unsigned_is_less(hx_uint32_t a, hx_uint3
 
 static __force_inline bool hx_is_equal(hx_uint32_t a, hx_uint32_t b) {
     return a.v == b.v;
-}
-
-static __force_inline hx_bool hx_xbool_to_bool(hx_xbool b, uint32_t xor) {
-    hx_bool rc = { b.v ^ xor};
-    return rc;
-}
-
-static __force_inline hx_bool hx_xbool_to_bool_checked(hx_xbool b, uint32_t xor) {
-    rcp_bxorvalid(b.v, xor);
-    hx_bool rc = { b.v ^ xor};
-    return rc;
 }
 
 static __force_inline hx_bool hx_uint32_to_bool_checked(hx_uint32_t v) {
@@ -655,9 +778,18 @@ static __force_inline hx_bool hx_step_safe_get_boot_flag(uint8_t bit) {
     return r0;
 }
 
+static __force_inline hx_bool __get_opaque_bool(hx_bool b) {
+    hx_bool rc = {__get_opaque_value(b.v) };
+    return rc;
+}
+
 static __force_inline hx_xbool __get_opaque_xbool(hx_xbool b) {
     hx_xbool rc = {__get_opaque_value(b.v) };
     return rc;
+}
+
+static __force_inline uint32_t __get_opaque_hx_value(hx_uint32_t v) {
+    return __get_opaque_value(v.v);
 }
 
 #endif
@@ -666,10 +798,38 @@ static __force_inline hx_xbool __get_opaque_xbool(hx_xbool b) {
 uint32_t varm_callable(s_native_step_safe_crit_mem_erase_by_words_impl)(uintptr_t start, uint MUST_be_zero, uint32_t byte_count);
 uint32_t varm_callable(s_native_crit_mem_copy_by_words_impl)(uint32_t *dest, const uint32_t *src, uint32_t byte_count);
 #if !defined(__riscv) && !defined(__ARM_ARCH_8M_MAIN__)
-static __force_inline uint s_varm_step_safe_crit_mem_erase_by_words(uintptr_t start, uint32_t byte_count) {
+static __force_inline uint s_varm_step_safe_crit_mem_erase_by_words(uintptr_t start, uint32_t byte_count, bool extra_assert) {
     uint bytes4 = varm_to_s_native_step_safe_crit_mem_erase_by_words_impl(start, 0, byte_count);
     hx_assert_equal2i(bytes4, byte_count);
+    if (extra_assert) hx_assert_equal2i(byte_count, bytes4);
     return bytes4;
+}
+
+static __force_inline uint s_varm_step_safe_crit_mem_erase_by_words_const_size(uintptr_t start, uint32_t byte_count, bool extra_assert) {
+    register uintptr_t r0 asm ("r0") = start;
+    register uintptr_t r1 asm ("r1") = 0;
+    if (byte_count > 255) {
+        pico_default_asm_volatile(
+            "movw r2, %[byte_count]\n"
+            "bl varm_to_s_native_step_safe_crit_mem_erase_by_words_impl\n"
+            "movw %[r1], %[byte_count]\n"
+            : [r1] "+l" (r1), "+l" (r0)
+            : [byte_count] "i" (byte_count)
+            : "r2", "r3", "lr", "cc"
+        );
+    } else {
+        pico_default_asm_volatile(
+            "movs r2, %[byte_count]\n"
+            "bl varm_to_s_native_step_safe_crit_mem_erase_by_words_impl\n"
+            "movs %[r1], %[byte_count]\n"
+            : [r1] "+l" (r1), "+l" (r0)
+            : [byte_count] "i" (byte_count)
+            : "r2", "r3", "lr", "cc"
+        );
+    }
+    hx_assert_equal2i(r1, r0);
+    if (extra_assert) hx_assert_equal2i(r0, r1);
+    return r0;
 }
 
 static __force_inline uint s_varm_crit_mem_copy_by_words(uint32_t *dest, const uint32_t *src, uint32_t byte_count) {
@@ -679,9 +839,17 @@ static __force_inline uint s_varm_crit_mem_copy_by_words(uint32_t *dest, const u
 }
 #else
 #if !defined(__riscv)
-static __force_inline uint s_native_crit_step_safe_mem_erase_by_words(uintptr_t start, uint32_t byte_count) {
+static __force_inline uint s_native_crit_step_safe_mem_erase_by_words(uintptr_t start, uint32_t byte_count, bool extra_assert) {
     uint bytes4 = s_native_step_safe_crit_mem_erase_by_words_impl(start, 0, byte_count);
     hx_assert_equal2i(bytes4, byte_count);
+    if (extra_assert) hx_assert_equal2i(byte_count, bytes4);
+    return bytes4;
+}
+
+static __force_inline uint s_native_crit_step_safe_mem_erase_by_words_const_size(uintptr_t start, uint32_t byte_count, bool extra_assert) {
+    uint bytes4 = s_native_step_safe_crit_mem_erase_by_words_impl(start, 0, byte_count);
+    hx_assert_equal2i(bytes4, byte_count);
+    if (extra_assert) hx_assert_equal2i(byte_count, bytes4);
     return bytes4;
 }
 

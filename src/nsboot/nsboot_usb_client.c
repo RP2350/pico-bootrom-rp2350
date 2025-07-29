@@ -138,6 +138,7 @@ static struct usb_endpoint picoboot_endpoints[2];
 #define PICOBOOT_IN_INDEX 1
 #define picoboot_out (picoboot_endpoints[PICOBOOT_OUT_INDEX])
 #define picoboot_in (picoboot_endpoints[PICOBOOT_IN_INDEX])
+#define PICOBOOT_IN_MINUS_OUT ((PICOBOOT_IN_INDEX - PICOBOOT_OUT_INDEX) * sizeof(struct usb_endpoint))
 static struct usb_interface picoboot_interface;
 #endif
 
@@ -338,12 +339,38 @@ void __attribute__((naked)) tf_picoboot_wait_command(__unused struct usb_endpoin
 }
 #endif
 
+#if !ASM_SIZE_HACKS
 void picoboot_ack(void) {
     static struct usb_transfer _ack_transfer;
     _picoboot_current_cmd_status.bInProgress = false;
     usb_start_empty_transfer((_picoboot_current_cmd_status.bCmdId & 0x80u) ? &picoboot_out : &picoboot_in, &_ack_transfer,
                              P16_F(tf_picoboot_wait_command));
 }
+#else
+static_assert(PICOBOOT_IN_MINUS_OUT == sizeof(struct usb_endpoint), "");
+static __used struct usb_transfer _ack_transfer;
+void __attribute__((naked)) picoboot_ack(void) {
+    pico_default_asm_volatile(
+        "ldr r0, =picoboot_endpoints\n"
+        "ldr r1, =_picoboot_current_cmd_status\n"
+        "ldrb r2, [r1, %[bCmdId]]\n"
+        "lsls r2, r2, #24\n"
+        "strb r2, [r1, %[bInProgress]]\n"
+        "bmi 1f\n"
+        "adds r0, r0, %[usb_endpoint_size]\n"
+        "1:\n"
+        "ldr r1, =_ack_transfer\n"
+        "mov.w r2, %[tf_picoboot_wait_command]\n"
+        "b.w usb_start_empty_transfer\n"
+        :
+        : [usb_endpoint_size] "i" (sizeof(struct usb_endpoint)),
+          [tf_picoboot_wait_command] "i" P16_CONSTANT(tf_picoboot_wait_command),
+          [bCmdId] "i" (offsetof(struct picoboot_cmd_status, bCmdId)),
+          [bInProgress] "i" (offsetof(struct picoboot_cmd_status, bInProgress))
+        : "r0", "r1", "memory"
+    );
+}
+#endif
 
 #define tf_ack ((usb_transfer_completed_func)P16_F(picoboot_ack))
 
@@ -444,7 +471,7 @@ const uint8_t picoboot_cmd_mapping[]= {
         sizeof(struct picoboot_address_only_cmd), 0x00, AT_EXEC,
         sizeof(struct picoboot_address_only_cmd), 0x00, AT_VECTORIZE_FLASH,
         sizeof(struct picoboot_reboot2_cmd), 0x00, 0, // reboot2 command handled directly, so no AT_ command
-        sizeof(struct picoboot_get_info_cmd), 0x80 | 0x20 | 0x10, AT_GET_INFO,
+        sizeof(struct picoboot_get_info_cmd), 0x80 | 0x20 | 0x10, AT_GET_INFO | AT_MASKABLE_EXIT_XIP,
         sizeof(struct picoboot_otp_cmd), 0x80 | 0x40 | 0x10, AT_OTP_READ,
         sizeof(struct picoboot_otp_cmd), 0x80 | 0x40 | 0x10, AT_OTP_WRITE,
 #if FEATURE_EXEC2
@@ -613,9 +640,6 @@ void nsboot_usb_device_init(__unused uint32_t bootsel_flags) {
         usb_disable_interface_mask = 0; // bad things happen if we try to disable both
 #else
     const uint32_t usb_disable_interface_mask = 0;
-#endif
-#if USE_BOOTROM_GPIO
-    gpio_setup();
 #endif
 
     // not sure whiy GCC ignores the align attribute on serial_number_string for warnings - it does align it

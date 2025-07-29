@@ -75,7 +75,7 @@ SECTIONS {
         "ERROR: do not use static memory in nsboot! (.data)")
 
     ASSERT((${NSBOOT_START} & 0x1f) == 0, "NSBOOT must be 32 byte aligned")
-/*    ASSERT(__irq14_vector - ((${NSBOOT_START} + ${NSBOOT_VTOR_OFFSET})&~0x7f) == (16 + 14) * 4, "USB irq vector entry is in the wrong place")*/
+    ASSERT(__irq14_vector - ((${NSBOOT_START} + ${NSBOOT_VTOR_OFFSET})&~0x7f) == (16 + 14) * 4, "USB irq vector entry is in the wrong place")
     ASSERT(__usb_ram_end - __usb_ram_begin <= LENGTH(USBRAM), "USB RAM overflow")
     ASSERT(__usb_ram_end - __usb_ram_begin == LENGTH(USBRAM), "Increase stack space to fill gap")
     INCLUDE "${P16_ASSERTS_LINKER_SCRIPT}"

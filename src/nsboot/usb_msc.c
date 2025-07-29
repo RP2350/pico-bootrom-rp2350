@@ -227,7 +227,7 @@ static void _scsi_handle_inquiry_response(struct scsi_cbw *cbw) {
     buf[1] = 0x80;
     white_label_copy_ascii(buf + offsetof(struct scsi_inquiry_response, vendor), sizeof(((struct scsi_inquiry_response *)0)->vendor), OTP_DATA_USB_WHITE_LABEL_ADDR_VALUE_INDEX_SCSI_INQUIRY_VENDOR_STRDEF, RPI_STRING);
     white_label_copy_ascii(buf + offsetof(struct scsi_inquiry_response, product), sizeof(((struct scsi_inquiry_response *)0)->product), OTP_DATA_USB_WHITE_LABEL_ADDR_VALUE_INDEX_SCSI_INQUIRY_PRODUCT_STRDEF, RP2350_STRING);
-    white_label_copy_ascii(buf + offsetof(struct scsi_inquiry_response, version), sizeof(((struct scsi_inquiry_response *)0)->version), OTP_DATA_USB_WHITE_LABEL_ADDR_VALUE_INDEX_SCSI_INQUIRY_VERSION_STRDEF, ONE_STRING);
+    white_label_copy_ascii(buf + offsetof(struct scsi_inquiry_response, version), sizeof(((struct scsi_inquiry_response *)0)->version), OTP_DATA_USB_WHITE_LABEL_ADDR_VALUE_INDEX_SCSI_INQUIRY_VERSION_STRDEF, TWO_STRING);
 #else
     memcpy(buf, &scsi_ir, sizeof(scsi_ir));
 #endif

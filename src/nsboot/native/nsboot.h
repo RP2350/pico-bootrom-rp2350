@@ -13,7 +13,7 @@
 #endif
 
 #ifndef __ASSEMBLER__
-#include "pico/bootrom_constants.h"
+#include "boot/bootrom_constants.h"
 #include "boot/picoboot.h"
 #include "bootrom_assert.h"
 #include "native_exports.h"
@@ -21,11 +21,11 @@
 #if !USE_16BIT_POINTERS
 #define RP2350_STRING "RP2350"
 #define RPI_STRING "RPI"
-#define ONE_STRING "1"
+#define TWO_STRING "2"
 #else
 #define RP2350_STRING P16_TYPED(const char *, _str_rp2350)
-#define RPI_STRING P16_TYPED(const char *, _str_rpi_1)
-#define ONE_STRING (P16_TYPED(const char *, _str_rpi_1) + 4)
+#define RPI_STRING P16_TYPED(const char *, _str_rpi_2)
+#define TWO_STRING (P16_TYPED(const char *, _str_rpi_2) + 4)
 #endif
 
 #if USE_PICOBOOT

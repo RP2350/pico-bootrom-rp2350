@@ -131,16 +131,14 @@
 #define CTAG_S_VARM_CRIT_RAM_TRASH_PERFORM_FLASH_SCAN_AND_MAYBE_RUN_IMAGE 0x68
 #define CTAG_S_VARM_CRIT_LOAD_RESIDENT_PARTITION_TABLE               0x8d
 #define CTAG_S_FROM_NSBOOT_VARM_RAM_TRASH_GET_UF2_TARGET_PARTITION   0x6d
-#define CTAG_S_FROM_NSBOOT_VARM_FLASH_PAGE_PROGRAM                   0xa5
-#define CTAG_S_FROM_NSBOOT_VARM_FLASH_READ_DATA                      0x4e
+#define CTAG_S_FROM_NSBOOT_VARM_COMMON_FLASH_READ_DATA_OR_PAGE_PROGRAM   0xa5
 #define CTAG_S_FROM_NS_VARM_PICOBOOT_EXEC2                           0x8b
 #define CTAG_S_VARM_CRIT_FLASH_CHECK_IN_BOUNDS_ADDR_SPAN             0x5a
 #define CTAG_S_VARM_CRIT_UPDATE_RBIT3                                0x84
 #define CTAG_S_FROM_NS_VARM_API_OTP_ACCESS_INTERNAL                  0x67
-#define CTAG_S_FROM_NS_VARM_API_GET_PARTITION_TABLE_INFO             0x9c
 
 #define CTAG_S_FROM_NSBOOT_VARM_OTP_ACCESS                           0xa9
-#define CTAG_S_FROM_NS_VARM_API_GET_SYS_INFO                         0xbb
+#define CTAG_S_FROM_NS_VARM_COMMON_GET_SYS_OR_PARTITION_TABLE_INFO   0xbb
 #define CTAG_S_OTP_CONFIGURE_RQ_CQ                                   0x5e
 #define CTAG_S_HX_OTP_GET_RBIT3_GUARDED                              0x6a
 #define CTAG_SG_CALL                                                 0x60
@@ -166,7 +164,8 @@
 #define CTAG_S_SAVE_CLEAR_AND_DISABLE_MPU                            0xbe
 #define CTAG_SB_FE_HARD                                              0x4b
 #define CTAG_S_VARM_CHECK_SCAN_WORK_AREA_AND_CHECK_SHA_LOCK          0x8c
-
+#define CTAG_ARM8_MEMCPY                                             0x79
+#define CTAG_SG_TABLE_ENTY                                           0xb9
 #if defined(__riscv) || !defined(FEATURE_CANARIES)
 #define canary_entry(tag) ((void)0)
 #define canary_entry_reg(reg, tag) ((void)0)

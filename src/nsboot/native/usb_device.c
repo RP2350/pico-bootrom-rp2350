@@ -207,17 +207,24 @@ static void _usb_give_buffer(struct usb_endpoint *ep, uint32_t len) {
     ep->halt_state = HS_NONE; // best effort recovery
 
     bootrom_assert(USB, len < 1023);
-    uint32_t val = len | USB_BUF_CTRL_AVAIL;
+    static_assert(!(uint8_t)USB_BUF_CTRL_AVAIL, "");
+    uint32_t flags = (USB_BUF_CTRL_AVAIL >> 8);
 
     if (ep->first_buffer_after_reset) {
         bootrom_assert(USB, !ep->current_give_buffer);
-        val |= USB_BUF_CTRL_SEL;
+        static_assert(!(uint8_t)USB_BUF_CTRL_SEL, "");
+        flags += USB_BUF_CTRL_SEL >> 8;
         ep->first_buffer_after_reset = false;
     }
 
     bootrom_assert(USB, len <= usb_endpoint_buffer_size(ep));
-    if (ep->in) val |= USB_BUF_CTRL_FULL;
-    val |= ep->next_pid ? USB_BUF_CTRL_DATA1_PID : USB_BUF_CTRL_DATA0_PID;
+    static_assert(!(uint8_t)USB_BUF_CTRL_FULL, "");
+    if (ep->in) flags += USB_BUF_CTRL_FULL >> 8;
+
+    static_assert(!(uint8_t)USB_BUF_CTRL_DATA0_PID, "");
+    static_assert(!(uint8_t)USB_BUF_CTRL_DATA1_PID, "");
+    flags += ep->next_pid ? USB_BUF_CTRL_DATA1_PID >> 8 : USB_BUF_CTRL_DATA0_PID >> 8;
+
     ep->next_pid ^= 1u;
 #if ENABLE_DEBUG_TRACE
     debug_trace[trace_i][0] = (uint32_t) _usb_buf_ctrl_narrow(ep, ep->current_give_buffer);
@@ -231,11 +238,11 @@ static void _usb_give_buffer(struct usb_endpoint *ep, uint32_t len) {
 #if !USB_BULK_ONLY_EP1_THRU_16
     if (ep->current_give_buffer)
     {
-        val |= USB_ISOCHRONOUS_BUFFER_STRIDE_TYPE << 11u; // 11 + 16 = 27 - which is where stride bits go (and only relevant on buffer 1)
+        flags |= USB_ISOCHRONOUS_BUFFER_STRIDE_TYPE << (11u - 8u); // 11 + 16 = 27 - which is where stride bits go (and only relevant on buffer 1)
     }
 #endif
 
-    *_usb_buf_ctrl_narrow(ep, ep->current_give_buffer) = (uint16_t) val;
+    *_usb_buf_ctrl_narrow(ep, ep->current_give_buffer) = (uint16_t) ((flags << 8u) + len);
     if (ep->in) {
         // if there is a buffer len, then it must have been accessed to fill it with data
         bootrom_assert(USB, !len || ep->current_hw_buffer.valid);
@@ -1127,9 +1134,9 @@ uint __used white_label_copy_string(aligned2_uint8_t *buf, uint buf_unicode_flag
             uint8_t unicode_flag_and_char_count;
             uint8_t row_offset;
         };
-        uint16_t hword;
+        int16_t shword;
     } str_def;
-    if (white_label_update_hwords_if_valid((uint8_t *) &str_def, str_def_index, 1) && str_def.hword && str_def.hword != 0xffff) {
+    if (white_label_update_hwords_if_valid((uint8_t *) &str_def, str_def_index, 1) && (uint)(str_def.shword + 1) >= 2) {
         // we support writing ASCII into UNICODE buffer, but not vice-versa
         if (wl_is_unicode(buf_unicode_flag_and_char_count) || !wl_is_unicode(str_def.unicode_flag_and_char_count)) {
             if (wl_is_unicode(buf_unicode_flag_and_char_count) && !wl_is_unicode(str_def.unicode_flag_and_char_count)) {
@@ -1833,9 +1840,18 @@ void __noinline usb_soft_reset_endpoint2(struct usb_endpoint ep[2]) {
 }
 
 void usb_clear_halt_condition(struct usb_endpoint *ep) {
+#if GENERAL_SIZE_HACKS
+    static_assert((HS_NONE & ~(HS_NONE >> 1)) == HS_NONE, "");
+    static_assert((HS_HALTED & ~(HS_HALTED >> 1)) == HS_HALTED, "");
+    static_assert((HS_NON_HALT_STALL & ~(HS_NON_HALT_STALL >> 1)) == HS_NON_HALT_STALL, "");
+    static_assert((HS_HALTED_ON_CONDITION & ~(HS_HALTED_ON_CONDITION >> 1)) == HS_HALTED, "");
+    static_assert(NUM_HALT_STATES == 4, "");
+    ep->halt_state &= ~(ep->halt_state >> 1);
+#else
     if (ep->halt_state == HS_HALTED_ON_CONDITION) {
         ep->halt_state = HS_HALTED; // can be reset by regular unstall
     }
+#endif
 }
 
 void usb_device_start(void) {

@@ -133,3 +133,6 @@ ${ROM_SRC_DIR}/scripts/check_useless_canaries $BUILD_V8M_DIR/bootrom.dis
 
 # Check for function returns where there isn't a canary function since the beginning of the function
 ${ROM_SRC_DIR}/scripts/check_function_returns $BUILD_V8M_DIR/bootrom.dis
+
+# Check for ROPs
+${ROM_SRC_DIR}/scripts/check_secure_xn $BUILD_COMBINED_DIR

@@ -13,7 +13,7 @@
 #if !COMPRESS_TEXT
 // because of mail merge we no longer have raw source for INDEX.HTM
 static const char *info_uf2_txt_template = 
-        "UF2 Bootloader v1.0\n"
+        "UF2 Bootloader v1.1\n"
         "Model: \n"
         "Board-ID: \n";
 #endif

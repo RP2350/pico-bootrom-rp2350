@@ -293,7 +293,7 @@ RT_FUNC_ENTRY_SHARED_SEC_NONSEC     ( ROM_FUNC_FLASH_OP,                      s_
 
 RT_FUNC_ENTRY_SHARED_SEC            ( ROM_FUNC_SET_ROM_CALLBACK,              s_varm_api_set_rom_callback                                                    )
 RT_FUNC_ENTRY_ARM_SEC               ( ROM_FUNC_VALIDATE_NS_BUFFER,            s_native_api_validate_ns_buffer                                                )
-RT_FUNC_ENTRY_ARM_SEC               ( ROM_FUNC_SET_NS_API_PERMISSION,         s_varm_api_set_ns_api_permission                                               )
+RT_FUNC_ENTRY_ARM_SEC               ( ROM_FUNC_SET_NS_API_PERMISSION,         s_arm8_api_set_ns_api_permission                                               )
 
 RT_FUNC_ENTRY_SHARED_SEC            ( ROM_FUNC_PICK_AB_PARTITION,             s_varm_api_pick_ab_partition                                                   )
 RT_FUNC_ENTRY_SHARED_SEC            ( ROM_FUNC_EXPLICIT_BUY,                  s_varm_api_explicit_buy                                                        )

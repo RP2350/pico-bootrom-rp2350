@@ -62,10 +62,20 @@ void __exported_from_arm s_varm_api_crit_connect_internal_flash(void) {
     // IO_BANK0 as that does not affect XIP signals)
     s_varm_step_safe_reset_unreset_block_wait_noinline(RESETS_RESET_IO_QSPI_BITS | RESETS_RESET_PADS_QSPI_BITS);
 
-    pads_qspi_hw->voltage_select = hx_is_true(hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_FLASH_IO_VOLTAGE_1V8_LSB));
+    io_rw_32 *iobank1 = (io_rw_32 *)IO_QSPI_BASE;
+#if !GENERAL_SIZE_HACKS
+    pads_qspi_hw_t *pads_qspi = pads_qspi_hw;
+#else
+    static_assert(PADS_QSPI_BASE == IO_QSPI_BASE + 0x10000, "");
+    uint32_t x10000 = __get_opaque_value(0x10000u);
+    pads_qspi_hw_t *pads_qspi = (pads_qspi_hw_t *)(((uintptr_t)iobank1) + x10000);
+#endif
+
+    pads_qspi->voltage_select = hx_is_true(hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_FLASH_IO_VOLTAGE_1V8_LSB));
 
     // Then mux XIP block onto internal QSPI flash pads
-    io_rw_32 *iobank1 = (io_rw_32 *)IO_QSPI_BASE;
+    static_assert(offsetof(io_qspi_hw_t, io[0].ctrl) == 20, "");
+    static_assert(offsetof(io_qspi_hw_t, io[1].ctrl) == 28, "");
 #if !GENERAL_SIZE_HACKS
     for (int i = 0; i < 6; ++i) {
         iobank1[2 * i + 5] = 0;
@@ -84,16 +94,23 @@ void __exported_from_arm s_varm_api_crit_connect_internal_flash(void) {
     // Finally, remove latching pad isolation
     io_rw_32 *clear_pads_qspi_io = __get_opaque_ptr(hw_clear_alias(&pads_qspi_hw->io[0]));
     for (uint i = 0; i < NUM_QSPI_GPIOS; ++i) {
-        clear_pads_qspi_io[i] = PADS_QSPI_GPIO_QSPI_SCLK_ISO_BITS;
+        static_assert(PADS_QSPI_GPIO_QSPI_SCLK_ISO_BITS == 0x10000 >> 8, "");
+        clear_pads_qspi_io[i] = x10000 >> 8;
     }
 
     // If there is an auxiliary chip select configured in OTP, now is the time
     // to patch that through to the pads as well.
     int cs1_gpio = inline_s_varm_flash_devinfo_get_cs1_gpio();
     if (cs1_gpio >= 0) {
-        padsbank0_hw->io[0] = PADS_BANK0_GPIO0_RESET;
-        iobank0_hw->io[cs1_gpio].ctrl = GPIO_FUNC_XIP_CS1;
-        padsbank0_hw->io[0] = PADS_BANK0_GPIO0_RESET & ~PADS_BANK0_GPIO0_ISO_BITS;
+#if !GENERAL_SIZE_HACKS
+        io_bank0_hw_t *iobank0 = io_bank0_hw;
+#else
+        static_assert(IO_BANK0_BASE == PADS_BANK0_BASE - 0x10000, "");
+        io_bank0_hw_t *iobank0 = (io_bank0_hw_t *)(((uintptr_t)pads_bank0_hw) - x10000);
+#endif
+        padsbank0_hw->io[cs1_gpio] = PADS_BANK0_GPIO0_RESET;
+        iobank0->io[cs1_gpio].ctrl = GPIO_FUNC_XIP_CS1;
+        padsbank0_hw->io[cs1_gpio] = PADS_BANK0_GPIO0_RESET & ~PADS_BANK0_GPIO0_ISO_BITS;
     }
     canary_check_step(STEPTAG_S_VARM_API_CRIT_CONNECT_INTERNAL_FLASH);
 }
@@ -107,7 +124,7 @@ void __exported_from_arm s_varm_api_crit_connect_internal_flash(void) {
 #define XIP_MODE_CFG(rfmt,rcmd) rfmt, ((rcmd) << QMI_M0_RCMD_PREFIX_LSB)
 #else
 // note bizarre / use to cause compile time (divide by zero) error if unexpected bits are set
-#define XIP_MODE_CFG(rfmt,rcmd) ((rfmt / (((rfmt)>>24)==0)) | ((rcmd / (((rcmd) >> 8)==0) << 24u)))
+#define XIP_MODE_CFG(rfmt,rcmd) ((((rfmt) / (((rfmt)>>24)==0)) << 8u) | ((rcmd) / (((rcmd) >> 8)==0)))
 #endif
 const uint32_t bootrom_xip_mode_cfgs[] = {
 // Mode 0: BOOTROM_XIP_MODE_03H_SERIAL (Generic run-on-a-potato serial read)
@@ -206,8 +223,8 @@ void __exported_from_arm s_varm_api_crit_flash_select_xip_read_mode(bootrom_xip_
     rfmt = mode_vals[0];
     rcmd = mode_vals[1];
 #else
-    rfmt = mode_vals[0] & 0xffffffu;
-    rcmd = mode_vals[0] >> 24u;
+    rfmt = mode_vals[0] >> 8u;
+    rcmd = (uint8_t)mode_vals[0];
 #endif
 #if !ASM_SIZE_HACKS
     for (int i = 0; i < 2; ++i) {
@@ -378,10 +395,38 @@ void __exported_from_arm s_varm_api_crit_flash_exit_xip(void) {
 // to a QSPI address of 0 on that chip select.
 void __exported_from_arm s_varm_api_crit_flash_reset_address_trans(void) {
     canary_set_step(STEPTAG_S_VARM_API_CRIT_FLASH_RESET_ADDRESS_TRANS);
+    // 0 04000000
+    // 1 04000400
+    // 2 04000800
+    // 3 04000c00
+    // 4 04000000
+    // 5 04000400
+    // 6 04000800
+    // 7 04000c00
+#if !ASM_SIZE_HACKS
     for (int i = 0; i < 8; ++i) {
         const uint32_t size = QMI_ATRANS0_RESET & QMI_ATRANS0_SIZE_BITS;
         qmi_hw->atrans[i] = size | ((i & 3) << ((QMI_ATRANS0_BASE_MSB + 1) - 2));
     }
+#else
+    uint32_t offset = 0x1c;
+    uint32_t tmp;
+    uint32_t size = QMI_ATRANS0_RESET & QMI_ATRANS0_SIZE_BITS;
+    static_assert(QMI_ATRANS0_BASE_LSB == 0, "");
+    static_assert(QMI_ATRANS0_BASE_MSB == 11, "");
+    pico_default_asm_volatile(
+        "1:\n"
+        "lsls %[tmp], %[offset], #28\n"
+        "lsrs %[tmp], #20\n"
+        "orrs %[tmp], %[size]\n"
+        "str %[tmp], [%[atrans], %[offset]]\n"
+        "subs %[offset], #4\n"
+        "bcs 1b\n"
+        : [tmp] "=&l" (tmp), [offset] "+l" (offset)
+        : [size] "l" (size), [atrans] "l" (&qmi_hw->atrans[0])
+        : "cc", "memory"
+    );
+#endif
     canary_check_step(STEPTAG_S_VARM_API_CRIT_FLASH_RESET_ADDRESS_TRANS);
 }
 
@@ -439,13 +484,13 @@ void __exported_from_arm s_varm_api_flash_range_program(flash_offset_t offset, c
 // context is locked up (e.g. if there is no flash device, and a hard pullup
 // on MISO pin -> SR read gives 0xff) and the host issues an abort in IRQ
 // context. Bit of a hack
-void __exported_from_arm s_varm_flash_abort(void) {
-    canary_set_step(STEPTAG_S_VARM_FLASH_ABORT);
-    hw_set_bits(
-            (io_rw_32 *) (IO_QSPI_BASE + IO_QSPI_GPIO_QSPI_SD1_CTRL_OFFSET),
-            IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_VALUE_LOW << IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_LSB
+void __exported_from_arm __attribute__((naked)) s_varm_flash_abort(void) {
+    pico_default_asm_volatile(
+            "movs r0, #0\n"
+            "b.n s_varm_flash_abort_common\n"
+            ".global s_varm_flash_abort_end\n"
+            "s_varm_flash_abort_end:\n"
     );
-    canary_check_step(STEPTAG_S_VARM_FLASH_ABORT);
 }
 
 // Restore original pin function following an abort. On RP2040 an abort was
@@ -453,12 +498,31 @@ void __exported_from_arm s_varm_flash_abort(void) {
 // RP2350 we only set up the flash once before entering nsboot (which is the
 // only user of the abort function) and then don't expose an interface for it
 // to be re-inited.
-void __exported_from_arm s_varm_flash_abort_clear(void) {
-    canary_set_step(STEPTAG_S_VARM_FLASH_ABORT_CLEAR);
-    hw_clear_bits(
-        (io_rw_32 *) (IO_QSPI_BASE + IO_QSPI_GPIO_QSPI_SD1_CTRL_OFFSET),
-        IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_BITS
+void __exported_from_arm __attribute__((naked)) s_varm_flash_abort_clear(void) {
+    pico_default_asm_volatile(
+            "movs r0, #1\n"
+            ".global s_varm_flash_abort_clear_end\n"
+            "s_varm_flash_abort_clear_end:\n"
     );
+}
+
+void __used s_varm_flash_abort_common(uint32_t clear) {
+    canary_set_step(STEPTAG_S_VARM_FLASH_ABORT_CLEAR);
+//    if (clear) {
+//        hw_clear_bits(
+//                (io_rw_32 *) (IO_QSPI_BASE + IO_QSPI_GPIO_QSPI_SD1_CTRL_OFFSET),
+//                IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_BITS
+//        );
+//    } else {
+//        hw_set_bits(
+//                (io_rw_32 *) (IO_QSPI_BASE + IO_QSPI_GPIO_QSPI_SD1_CTRL_OFFSET),
+//                IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_VALUE_LOW << IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_LSB
+//        );
+//    }
+    // note this isn't the same as the above, but we never set anything other than LOW, so it should be fine to just clear that
+    static_assert(REG_ALIAS_CLR_BITS - REG_ALIAS_SET_BITS == 1u << 12, "");
+    uintptr_t io_qspi_sd1_ctrl_set = (uintptr_t)hw_set_alias((io_rw_32 *) (IO_QSPI_BASE + IO_QSPI_GPIO_QSPI_SD1_CTRL_OFFSET));
+    *(io_rw_32 *)(io_qspi_sd1_ctrl_set + (clear << 12)) = IO_QSPI_GPIO_QSPI_SD1_CTRL_INOVER_VALUE_LOW;
     canary_check_step(STEPTAG_S_VARM_FLASH_ABORT_CLEAR);
 }
 
@@ -514,7 +578,7 @@ void __used __attribute__((naked)) s_varm_flash_sector_erase(__unused flash_offs
     {canary_entry_reg(ip, S_VARM_FLASH_USER_ERASE); __dataflow_barrier(__stack_canary_value);}
     pico_default_asm_volatile(
         "movs r3, #0\n"
-        "b.n 1f\n"
+        "b.n flash_sector_erase_done\n"
     ".global s_varm_flash_page_program\n"
     ".thumb_func\n"
     "s_varm_flash_page_program:\n"
@@ -525,7 +589,7 @@ void __used __attribute__((naked)) s_varm_flash_sector_erase(__unused flash_offs
         "movs r2, r1\n"
         "movs r1, #0x02\n"
         "lsls r3, r1, #7\n" // 256 bytes
-    "1:\n"
+    "flash_sector_erase_done:\n"
         // fall through into s_varm_flash_erase_or_program via linker script fettling
     );
 }
@@ -547,10 +611,23 @@ static void __used s_varm_flash_erase_or_program(flash_offset_t offset, uint8_t 
         bootrom_assert(GENERIC_FLASH, !(offset & 0xfffu));
     }
     uint cs = inline_s_varm_flash_cs_from_offset(offset);
-    cs = s_varm_flash_enable_write(cs);
+
+    //cs = s_varm_flash_enable_write(cs);
+    uint write_enable = FLASHCMD_WRITE_ENABLE | QMI_DIRECT_TX_NOPUSH_BITS;
+    qmi_hw->direct_tx = write_enable;
+    cs = s_varm_flash_put_get_nodata(cs);
+
     s_varm_flash_put_cmd_addr(cmd, offset);
     cs = varm_to_s_native_crit_flash_put_get(cs, tx, NULL, count);
-    (void)s_varm_flash_wait_ready(cs);
+
+    //(void)s_varm_flash_wait_ready(cs);
+    uint8_t stat;
+    do {
+        // qmi_hw->direct_tx = FLASHCMD_READ_STATUS | QMI_DIRECT_TX_NOPUSH_BITS;
+        qmi_hw->direct_tx = __get_opaque_value(FLASHCMD_WRITE_ENABLE | QMI_DIRECT_TX_NOPUSH_BITS) + FLASHCMD_READ_STATUS - FLASHCMD_WRITE_ENABLE;
+        cs = varm_to_s_native_crit_flash_put_get(cs, NULL, &stat, 1);
+    } while ((stat & 0x1) && !s_varm_flash_was_aborted());
+
     canary_exit_void(S_VARM_FLASH_USER_ERASE);
 }
 #endif
@@ -630,7 +707,7 @@ void __attribute__((naked)) __exported_from_arm s_varm_crit_flash_read_data(__un
         "adds r1, #0xe\n"
         "movs r3, #7\n"
         "rors r1, r3\n"
-        "b.w varm_to_native_memcpy\n"
+        "b.n varm_to_native_memcpy\n"
     );
 }
 #endif

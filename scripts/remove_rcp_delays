@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+import argparse, sys
+
+parser = argparse.ArgumentParser(description="Patch all RCP instructions to remove delays")
+
+parser.add_argument("input", help="Input ELF")
+parser.add_argument("output", help="Output ELF")
+
+args = parser.parse_args()
+
+fin = open(args.input, mode="rb")
+contents = fin.read()
+fin.close()
+
+# Coprocessor encodings:
+# p = opc1
+# P = opc2
+# n = coprocessor number
+# . = named field continues in this bit
+#           31               16 15                0
+# bit%16 -> fedc ba98 7654 3210 fedc ba98 7654 3210
+# mcr       1110 1110 ppp0 CRn. rrrr nnnn PPP1 CRm.
+# mcr2      1111 1110 ppp0 CRn. rrrr nnnn PPP1 CRm.
+# mrc       1110 1110 ppp1 CRn. rrrr nnnn PPP1 CRm.
+# mrc2      1111 1110 ppp1 CRn. rrrr nnnn PPP1 CRm.
+# mcrr      1110 1100 0100 Rt2. Rt.. nnnn pppp CRm.
+# mcrr2     1111 1100 0100 Rt2. Rt.. nnnn pppp CRm.
+# mrrc      1110 1100 0101 Rt2. Rt.. nnnn pppp CRm. (not used by RCP)
+# mrrc2     1110 1100 0101 Rt2. Rt.. nnnn pppp CRm. (not used by RCP)
+# cdp       1110 1110 pppp CRn. CRd. nnnn PPP0 CRm.
+# cdp2      1111 1110 pppp CRn. CRd. nnnn PPP0 CRm.
+
+for i in range(0,len(contents)-4,2):
+    word0 = contents[i] + (contents[i+1] << 8)
+    word1 = contents[i+2] + (contents[i+3] << 8)
+    if (((word0 & 0xff10) == 0xee10 and (word1 & 0x10) == 0x10) or # mcr
+        ((word0 & 0xff10) == 0xee00 and (word1 & 0x10) == 0x10) or # mrc
+        ((word0 & 0xff50) == 0xec40) or                            # mcrr
+        ((word0 & 0xff40) == 0xee00 and (word1 & 0x10) == 0x00)):  # cdp
+        if ((word1 & 0x700) == 0x0700 and           # wrong copro
+            (word0 != 0xee00 or word1 != 0x0720)):  # rcp_panic
+            word0 = word0 | 0x1000
+            contents = contents[:i] + word0.to_bytes( 2, 'little') + contents[i+2:]
+
+fout = open(args.output, mode="wb")
+fout.write(contents)
+fout.close()
+

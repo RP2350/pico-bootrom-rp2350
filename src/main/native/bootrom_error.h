@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "pico/bootrom_constants.h"
+#include "boot/bootrom_constants.h"
 
 static_assert(BOOTROM_OK == PICO_OK, "");
 //static_assert(BOOTROM_ERROR_TIMEOUT == PICO_ERROR_TIMEOUT, "");

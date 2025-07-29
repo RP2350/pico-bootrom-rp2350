@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 set(CMAKE_C_STANDARD 11)
 
+set(PICO_NO_PICOTOOL 1) # for now - we aren't using picotool for diassembly atm.
 set(PICO_NO_UF2 1) # turn off SDK UF2 output
 if (NSBOOT_BUILD AND NOT PICO_COMPILER)
     set(PICO_COMPILER "pico_arm_cortex_m23_gcc")

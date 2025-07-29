@@ -31,7 +31,7 @@ reboot_return:
 .cpu cortex-m23
 #endif
     // hardening: done
-    pop {r1, r2, r4, pc}
+    pop {r1, r4, r5, pc}
 
 // this is in assembly, as it passes an arg in r4
 .global s_from_nsboot_varm_reboot
@@ -39,45 +39,62 @@ s_from_nsboot_varm_reboot:
     mov r3, r4
 .global s_from_ns_varm_api_reboot
 s_from_ns_varm_api_reboot:
+    // note we are making 0 an invalid reboot_type in bits 0-3; 0x7 / 0xf weren't
+    // valid input values so we won't overflow
+    uxth r0, r0 // no valid high bits and we need that to be zero below
+    adds r0, #1
     // this innocuous line of code does a myriad of things:
     //
-    // 1. copy r0 to be the 5th argument to s_varm_hx_reboot
-    // 2. don't care about saving r1, but we need space for the canary
-    // 3. r4 is for stack alignment
-    // 4. lr this one we'll return to later
-    push {r0, r1, r4, lr}
+    // 1. r3 (sp) is written to what will be the 5th arg to s_varm_hx_reboot below...
+    //            this must be word aligned so can't be 0xe (PC_SP reboot)
+    // 2. r4-r5 temporaries (only need 3 but for alignment)
+    // 3. lr this one we'll return to later
+    push {r3, r4, r5, lr}
+    movs r4, r0
 
 #if FEATURE_CANARIES
 .cpu cortex-m33
-    rcp_canary_get_nodelay r4, CTAG_S_FROM_NS_VARM_API_REBOOT_ENTRY
+    rcp_canary_get r5, CTAG_S_FROM_NS_VARM_API_REBOOT_ENTRY
 .cpu cortex-m23
-    str r4, [sp, #4]
+    str r5, [sp, #4]
 #endif
-    // Redundant args are passed in r0/*sp, and we want them to mismatch when
-    // bit 3 is set (set for all Secure-only reboot types).
 
+    // use r3 for temporary as it is the stack pointer, so low 2 bits must be 0
     // first check that bit 3 isn't set (since that shouldn't be calling from NS)
-    lsls r4, r0, #29
-    bcs fail_reboot
+    ldr r5, =#0xfff7
+    ands r5, r0
+    // note top bits of r0 are already clear due to uxth babove
+    cmp r5, r0
+    bne fail_reboot
 
-    // now, try quite hard to clear bit 3 in r0, so that if bit3 were set in our
-    // now-stacked 5th argument to s_varm_hx_reboot, the value in r0 won't match
-    // and we'll get an rcp_ violation in the callee
+    // Redundant args are in r0/r4, and we clear bit 3 in both...
+    ands r0, r5
+    // r4 should be equal to r5, so shouldn't have bit set
+.cpu cortex-m33
+    rcp_iequal r0, r4
+.cpu cortex-m23
+    ands r4, r5
 
-    // 1. put r0 back together without bit 3
-    lsrs r4, r4, #29
-    lsrs r0, r0, #4
-    lsls r0, r0, #4
-    orrs r0, r4
-    // 2. clear bit 3
-    movs r4, #8
-    bics r0, r4
+    // clear some bits again; if movs instruction ios skipped, we'll get 0
+    movs r5, #8
+    bics r0, r5
+    bics r4, r5
+    str r4, [sp, #0]
+
+    // check we wrote
+    ldr r5, [sp, #0]
+.cpu cortex-m33
+    rcp_iequal r0, r5
+.cpu cortex-m23
     bl s_varm_hx_reboot
     b reboot_return
 
 .global s_varm_api_reboot
 .thumb_func
 s_varm_api_reboot:
+    // note we are making 0 an invalid reboot_type in bits 0-3; 0xf wasn't
+    // a valid input value so won't overflow
+    adds r0, #1
     push {r0, lr} // r0 is arg 4 to s_varm_hx_reboot
     bl s_varm_hx_reboot
     pop {r1, pc} // discard stacked value into r1
@@ -184,7 +201,7 @@ s_native_step_safe_hx_get_boot_flag_impl:
     pop {r1-r5, pc}
 #endif
 
-.global s_varm_swap_mpu_state
+.global s_varm_swap_mpu_state // note this only applies to  RLAR for regions 0-3
 .thumb_func
 // args: mpu, buf, mask
 // write (buf & mask) to mpu, whilst saving current value of mpu to buf.
@@ -288,6 +305,11 @@ s_native_default_xip_setup_end:
 .p2align 2
 .global sonly_varm_make_hx_bool_impl
 .thumb_func
+// hx_bool sonly_varm_make_hx_bool_impl(uint a, uint b)
+// only likely to return a valid hx_bool if a == b and (a == 0 or a == 1)
+//
+// note that N and Z flags are set based on the hx_bool on return so there is no need to
+// compare the return vs zero
 sonly_varm_make_hx_bool_impl:
 #if FEATURE_CANARIES
 .cpu cortex-m33
@@ -403,48 +425,109 @@ varm_to_s_native_crit_flash_put_get:
 // which is the value to write to the runtime OTP locks to advance the secure locks according to the bootloader locks,
 // and disable NS access completely.
 
-.section .text.s_otp_advance_bl_to_s_value // (uint32_t ignored, uint32_t page)
-.global s_otp_advance_bl_to_s_value
+.section .text.s_otp_advance_bl_to_s_value_trash_r4_preserve_ip // (uint32_t ignored, uint32_t page)
+.global s_otp_advance_bl_to_s_value_trash_r4_preserve_ip
 .thumb_func
 #if OTP_SW_LOCK0_SEC_LSB != 0
 // we are shifting the BL 2 bits from the OTP format into the SW secure setting format
 #error
 #endif
-s_otp_advance_bl_to_s_value:
+s_otp_advance_bl_to_s_value_trash_r4_preserve_ip:
 #if FEATURE_CANARIES
 .cpu cortex-m33
     rcp_count_set STEPTAG_S_OTP_ADVANCE_BL_TO_S_VALUE
 .cpu cortex-m23
 #endif
+    lsls r4, r1, #3
+    sxtb r0, r0 // we expect r0 to be 0xff or 0xcf on entry so let's set bits 8-31 with a cheap instruction in case the read is skipped below
     ldr r2, =otp_data_raw_guarded + OTP_DATA_PAGE0_LOCK1_ROW * 4
     lsls r1, #3
-    ldr r0, [r2, r1]
+    // these are unused bits just above the NS bits which will get shifted down into the NS bits of the sw lock bits
+    // in the result below (we want 0b11 for NS)
+    ldr r3, =0xc0c0
+    ldr r0, [r2, r1] // r0 = sw_lock[page]
+    orrs r0, r3      // | 0xc0c0
+.cpu cortex-m33
+    rcp_iequal r1, r4
+.cpu cortex-m23
+    // do an extra read for sanity check
+    ldr r2, =otp_data_raw_guarded + OTP_DATA_PAGE0_LOCK1_ROW * 4
+    ldr r3, =0xc0c0
+    ldr r2, [r2, r4] // r2 = sw_lock[page]
+    orrs r2, r3      // | 0xc0c0
+
     // r0 = AaBbCc (A is a nibble with 4 bits dont_care:bl_perms, a is a nibble with ns_perms:s_perms)
     lsrs r1, r0, #8 + OTP_DATA_PAGE0_LOCK1_LOCK_BL_LSB
-    // r1 = 00AaB
-    lsls r2, r0, #16 - OTP_DATA_PAGE0_LOCK1_LOCK_BL_LSB
-    // r2 = aBbCc000
-    orrs r1, r2
+    // r4= 00AaB
+    lsls r4, r0, #16 - OTP_DATA_PAGE0_LOCK1_LOCK_BL_LSB
+    // r4 = aBbCc000
+    orrs r1, r4
     // r1 = aBbCcAaB
+
+    // r2 = AaBbCc (A is a nibble with 4 bits dont_care:bl_perms, a is a nibble with ns_perms:s_perms)
+    lsrs r3, r2, #8 + OTP_DATA_PAGE0_LOCK1_LOCK_BL_LSB
+    // r3 = 00AaB
+    lsls r4, r2, #16 - OTP_DATA_PAGE0_LOCK1_LOCK_BL_LSB
+    // r4 = aBbCc000
+    orrs r3, r4
+    // r3 = aBbCcAaB
+
     lsrs r0, #OTP_DATA_PAGE0_LOCK1_LOCK_BL_LSB
-    // r0 = 000AaBbC
-    ands r1, r0
-    // r1 = 000(A&C)(a&c)(A&B)(a&b)(BC)
-    movs r0, #OTP_SW_LOCK0_NSEC_BITS
+    // r1 = aBbCcAaB
+    ands r0, r1
+    // r0 = 000(A&C)(a&c)(A&B)(a&b)(B&C)
+
+    lsrs r2, #OTP_DATA_PAGE0_LOCK1_LOCK_BL_LSB
+    // r1 = 000AaBbC
+    ands r2, r3
+    // r2 = 000(A&C)(a&c)(A&B)(a&b)(B&C)
+
+.cpu cortex-m33
+    rcp_iequal r0, r2
+.cpu cortex-m23
+    orrs r0, r2
+    // let's try to minimize the likelihood the r0 has bits not set when they should be
+    //   - if this isn't skipped, then we have B&C in the low 2 bits
+    //   - if this is skipped, then we have C in the low 2 bits
+    // note the first loop obviously does nothing useful as a result
 1:
     orrs r0, r1
+    orrs r0, r3
     lsrs r1, #8
+    lsrs r3, #8
     bne 1b
-    // loop0, r0 = 000(A&C)x(A&B)X(0b1100 | B&C)
-    // loop1, r0 = 000(A&C)x(0b1100 | (B&C | A&B))
-    // loop2, r0 = 000000x(0b1100 | B&C | A&B | A&C)
-    // loop3, r0 = 000000x(0b1100 | B&C | A&B | A&C)
-    lsls r0, #28
-    lsrs r0, #28
-    // r0 = 0b1100 | B&C | A&B | A&C)
+    movs r2, #0
+.cpu cortex-m33
+    rcp_iequal r1, r2
+.cpu cortex-m23
+
+    // end of loop0, r0 = 000(A&C)(a&c)(A&B)(a&b)(B&C)
+    //               r1 = 000  0    0  (A&C)(a&c)(A&B)
+    // end of loop1, r0 = 000(A&C)(a&c)(A&B | A&C)(a&b | a&c)(B&C | A&B)
+    //               r1 = 000  0    0       0          0     (A&C)
+    // end of loop2, r0 = 000(A&C)(a&c)(A&B | A&C)(a&b | a&c)(B&C | A&B | A&C)
+    //               r1 = 000  0    0       0          0             0
+
+#if OTP_SW_LOCK0_BITS != 0xf
+#error expect to not need to mask bits
+#endif
+    // note the top bits 8-23 may have some non-definitive vote inputs, but those
+    // should still be the same on repeated calls to this function
+
+    // we inject inputs above to make sure (a&b | a&c) == 11xx, and check that now
+    // as a sanity check that the operations were likely performed
+
+    lsls r1, r0, #28
+    lsrs r1, r1, #30
+    adds r4, r3, #0x3 // r3 should have been zero
+.cpu cortex-m33
+    rcp_iequal r1, r4
+.cpu cortex-m23
+
 #if FEATURE_CANARIES
 .cpu cortex-m33
     rcp_count_check STEPTAG_S_OTP_ADVANCE_BL_TO_S_VALUE
+    rcp_iequal r4, r1
 .cpu cortex-m23
 #endif
     bx lr
@@ -482,6 +565,7 @@ varm_to_s_native_busy_wait_at_least_cycles:
     RISCV_REDIRECT_HINT(s_native_busy_wait_at_least_cycles)
 s_native_busy_wait_at_least_cycles:
 1:
+    // This function clobbers only r0 + cc, and some callers rely on this!
     subs r0, #3
     bcs 1b
     bx lr
@@ -517,3 +601,41 @@ s_varm_init_diagnostic32_impl:
 .cpu cortex-m23
 #endif
     bx lr
+
+// note this must return true if and only if the address is something we would
+// be willing to load to (e.g. not an IO register)
+// bool __exported_from_arm __attribute__((section(".text.s_code"))) varm_is_sram_or_xip_ram(uint32_t addr) {
+//     static_assert((SRAM_BASE & ((1u << 25) - 1)) == 0, "");
+//     static_assert((XIP_BASE & ((1u << 25) - 1)) == 0, "");
+//     static_assert((XIP_END & ((1u << 25) - 1)) == 0, "");
+//     static_assert((SRAM_BASE >> 25) == 0x10, "");
+//     static_assert((SRAM_END >> 25) == 0x10, "");
+//     canary_entry_reg(ip, VARM_IS_SRAM_OR_XIP_RAM);
+//     bool rc = (addr >> 14) == (XIP_SRAM_BASE >> 14) || ((addr >> 25) == 0x10 && addr < SRAM_END);
+//     canary_exit_return(VARM_IS_SRAM_OR_XIP_RAM, rc);
+// }
+.global varm_is_sram_or_xip_ram
+varm_is_sram_or_xip_ram:
+.cpu cortex-m33
+    // this is in ASM so we can preserve r1-r3
+    push {r1, r2, r3, lr}
+    rcp_canary_get_nodelay ip, CTAG_VARM_IS_SRAM_OR_XIP_RAM
+.cpu cortex-m23
+    movw	r2, #XIP_SRAM_BASE >> 14
+    movs	r3, #1
+    lsrs	r1, r0, #14
+    cmp	r1, r2
+    beq.n	1f
+    movs	r3, #0
+    lsrs	r2, r0, #25
+    cmp	r2, #0x10
+    bne.n	1f
+    ldr	r2, =SRAM_END - 1
+    cmp	r2, r0
+    adcs	r3, r3
+1:
+.cpu cortex-m33
+    rcp_canary_check_nodelay ip, CTAG_VARM_IS_SRAM_OR_XIP_RAM
+.cpu cortex-m23
+    movs	r0, r3
+    pop {r1, r2, r3, pc}

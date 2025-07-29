@@ -11,8 +11,10 @@
 
 #define BOOTRAM_PREBOOT_OFFSET 0
 #define BOOTRAM_PREBOOT_OFFSET_HX_NSBOOT_FLAG (0x210 + HACK_STACK_WORDS * 4)
+#define BOOTRAM_NSBOOT_SECURE_STACK_OFFSET 0
 
 // Needed in ASM:
+#define BOOTRAM_RUNTIME_PER_CORE_WORDS (BOOTRAM_RUNTIME_PER_CORE_SIZE/4)
 #define BOOTRAM_ALWAYS_OFFSET (BOOTRAM_SIZE - BOOTRAM_ALWAYS_SIZE)
 #define BOOTRAM_ALWAYS_SECURE_OFFSET (BOOTRAM_ALWAYS_OFFSET + 40)
 #define BOOTRAM_ALWAYS_CALLBACKS_OFFSET (BOOTRAM_ALWAYS_SECURE_OFFSET + 4)
@@ -24,7 +26,9 @@
 #define BOOTRAM_ALWAYS_PARTITION_TABLE_OFFSET (BOOTRAM_NS_API_PERMISSIONS_OFFSET - 144)
 #define BOOTRAM_ALWAYS_FLASH_DEVINFO_OFFSET (BOOTRAM_ALWAYS_CALLBACKS_OFFSET - 24)
 #define BOOTRAM_ALWAYS_BOOT_DIAGNOSTIC_OFFSET (BOOTRAM_ALWAYS_CALLBACKS_OFFSET + 8)
+#define BOOTRAM_NSBOOT_SECURE_STACK_SIZE (BOOTRAM_RUNTIME_XIP_SETUP_CODE_WORDS * 4 + BOOTRAM_RUNTIME_PER_CORE_WORDS * 8 - BOOTRAM_ARM_STATIC_DATA_SIZE)
 #define BOOTRAM_PREBOOT_WORKAREA_SIZE 4
+#define BOOTRAM_RUNTIME_XIP_SETUP_CODE_WORDS (256 - BOOTRAM_ALWAYS_SIZE / 4 - BOOTRAM_RUNTIME_PER_CORE_WORDS * 2)
 #ifndef __ASSEMBLER__
 #include "nsboot_config.h" // for chip_id_t
 #include "hardware/structs/bootram.h"
@@ -38,8 +42,6 @@ static inline void set_boot_once_bit(uint index) {
     bootram_hw->write_once[index/32] = 1u << index;
 }
 
-#define BOOTRAM_RUNTIME_PER_CORE_WORDS (BOOTRAM_RUNTIME_PER_CORE_SIZE/4)
-#define BOOTRAM_RUNTIME_XIP_SETUP_CODE_WORDS (256 - BOOTRAM_ALWAYS_SIZE / 4 - BOOTRAM_RUNTIME_PER_CORE_WORDS * 2)
 static_assert(BOOTRAM_RUNTIME_XIP_SETUP_CODE_WORDS == 64, "");
 
 typedef struct {
@@ -101,7 +103,7 @@ typedef struct bootram {
             // note both stacks bottom out at the beginning of bootram, so stack overflow will fault
             union {
                 struct {
-                    uint32_t secure_stack[BOOTRAM_RUNTIME_XIP_SETUP_CODE_WORDS + BOOTRAM_RUNTIME_PER_CORE_WORDS * 2 - BOOTRAM_ARM_STATIC_DATA_SIZE / 4];
+                    uint32_t secure_stack[BOOTRAM_NSBOOT_SECURE_STACK_SIZE / 4];
                     // the .allowed_static_data state goes here
                     uint32_t static_data_shadow[BOOTRAM_ARM_STATIC_DATA_SIZE / 4];
                 } arm;
@@ -222,4 +224,6 @@ static_assert(offsetof(bootram_t, always.partition_table) == BOOTRAM_ALWAYS_PART
 static_assert(offsetof(bootram_t, always.zero_init.flash_devinfo) == BOOTRAM_ALWAYS_FLASH_DEVINFO_OFFSET, "");
 static_assert(offsetof(bootram_t, always.boot_diagnostic) == BOOTRAM_ALWAYS_BOOT_DIAGNOSTIC_OFFSET, "");
 static_assert(offsetof(bootram_t, always.secure) == BOOTRAM_ALWAYS_SECURE_OFFSET, "");
+static_assert(offsetof(bootram_t, nsboot.arm.secure_stack) == BOOTRAM_NSBOOT_SECURE_STACK_OFFSET, "");
+static_assert(sizeof(((bootram_t*)0)->nsboot.arm.secure_stack) == BOOTRAM_NSBOOT_SECURE_STACK_SIZE, "");
 #endif

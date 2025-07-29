@@ -125,7 +125,7 @@ __mtvec:
 // corresponding table data.
 .global riscv_table_lookup_entry
 riscv_table_lookup_entry:
-    la_romaddr a3, BOOTROM_ROMTABLE_START
+    li a3, BOOTROM_ROMTABLE_START
     mv a5, a0
     j _lookup_next_symbol
 _lookup_skip_to_next:
@@ -293,10 +293,13 @@ riscv_entry_point:
     li a0, BOOTROM_STATE_RESET_CURRENT_CORE
     jal s_native_api_bootrom_state_reset
 
-// Check if this is core 0, and go to holding pen if not
+// Check if this is core 0, and go to holding pen if not.
+// NOTE: We DO NOT use any stack on core 1 until a stack pointer is provided.
 check_core:
-    // NOTE: We DO NOT use any stack prior to possible watchdog entry
-    csrr a0, mhartid
+    // CPUID and mhartid return the same value; here, checking CPUID is
+    // smaller because we need SIO_BASE in wait_for_vector too.
+    li a4, SIO_BASE
+    lw a0, SIO_CPUID_OFFSET(a4)
     bnez a0, wait_for_vector
 
 #if USE_BOOT_TIMER
@@ -369,8 +372,8 @@ send_and_then:
     h3.unblock
     jr a5
 
+    // a4 should already be initialised to SIO_BASE:
 wait_for_vector:
-    li a4, SIO_BASE
     // Allow the h3.block instruction to release system wake request, but don't gate the processor
     // clock (msleep.deepsleep) because this blocks System Bus Access when asleep (Hazard3 v1.0 rc1
     // erratum). The power difference should be minimal, as the hierarchical clock gating should
@@ -389,7 +392,11 @@ core_0_handshake_loop:
     // drain the FIFO before sending 0
     lw a1, SIO_FIFO_ST_OFFSET(a4)
     slli a1, a1, 31 - SIO_FIFO_ST_VLD_LSB
+#if SIO_FIFO_ST_VLD_LSB == 0
+    bnez a1, 1b // compressible
+#else
     bltz a1, 1b
+#endif
 
     // ...and_then = receive_and_check-zero (which jmps to core_0_handshake_loop on 0)
     la_romaddr a5, receive_and_check_zero
@@ -407,7 +414,12 @@ core_0_handshake_loop:
     // initialize
     mv sp, a0
     jal send_and_then
+#if !GENERAL_SIZE_HACKS
     la_romaddr a5, core1_launch
+#else
+    // NOTE: must maintain the relative location of core1_launch and receive_and_check_zero
+    addi a5, a5, -10
+#endif
     // receive IP (0 sends us back into handshake loop)
     jal send_and_then
 core1_launch:
@@ -430,13 +442,37 @@ receive_and_check_zero:
     h3.block
     lw a0, SIO_FIFO_ST_OFFSET(a4)
     slli a0, a0, 31 - SIO_FIFO_ST_VLD_LSB
+#if SIO_FIFO_ST_VLD_LSB == 0
+    beqz a0, receive_and_check_zero // (compressible)
+#else
     bgez a0, receive_and_check_zero
+#endif
 
     lw a0, SIO_FIFO_RD_OFFSET(a4)
     // if we received 0, we reset back to main loop
     beqz a0, core_0_handshake_loop
 .global native_noop
 native_noop:
+    ret
+
+// Branch predictor doesn't reliably kick in for a loop containing only a
+// single 16-bit, word-aligned instruction (doesn't misexecute, you just
+// don't win the prediction cycle) so make the body 32-bit, and align the
+// function to ensure we don't pay a fetch align penalty:
+.global s_native_busy_wait_at_least_cycles
+.p2align 2
+s_native_busy_wait_at_least_cycles:
+1:
+#ifdef __riscv_zca
+    // Workaround for assembler bug (this is the same as below)
+    .insn i 0x13, 0, a0, a0, -2
+#else
+.option push
+.option norvc
+    addi a0, a0, -2
+.option pop
+#endif
+    bgez a0, 1b
     ret
 
 // ----------------------------------------------------------------------------
@@ -465,26 +501,6 @@ s_native_secure_call_pc_sp:
     mv sp, s0
     cm.popret {ra,s0}, +16
 
-// Branch predictor doesn't reliably kick in for a loop containing only a
-// single 16-bit, word-aligned instruction (doesn't misexecute, you just
-// don't win the prediction cycle) so make the body 32-bit, and align the
-// function to ensure we don't pay a fetch align penalty:
-.global s_native_busy_wait_at_least_cycles
-.p2align 2
-s_native_busy_wait_at_least_cycles:
-1:
-#ifdef __riscv_zca
-    // Workaround for assembler bug (this is the same as below)
-    .insn i 0x13, 0, a0, a0, -2
-#else
-.option push
-.option norvc
-    addi a0, a0, -2
-.option pop
-#endif
-    bgez a0, 1b
-    ret
-
 // This is mostly a shared varm function, but there is a native RISC-V prelude
 // to it which can't be executed under varmulet because it is resetting
 // actual varmulet state, which is saved/restored in varm_wrapper:
@@ -512,5 +528,7 @@ s_native_api_bootrom_state_reset:
 .hword __armexport_s_varm_step_safe_api_crit_bootrom_state_reset_addr
 
 _:
+// seems like a GCC bug; without this it injects an extra 4 bytes despite the fact that it is already aligned
+.p2align 2
 
 #endif

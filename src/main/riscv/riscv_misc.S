@@ -164,9 +164,11 @@ memset:
 
 // ----------------------------------------------------------------------------
 
-// void __exported_from_arm *s_native_api_validate_ns_buffer(
-//     const void *addr, uint32_t size, hx_bool write, hx_bool *ok);
+// uint64_t __exported_from_arm s_native_validate_ns_buffer_internal(
+//     const void *addr, uint32_t size, hx_bool write);
 //
+// note low 32 bits of return value are the checked pointetr
+//      high 32 bits are a hx_bool ok
 // On RISC-V there is no such thing as S/NS, so this function is stubbed out
 // to always return true. We support it as a stub (overloaded for Arm/RISC-V
 // via an emulator hint) so that the nsboot-to-Secure shims can be run under
@@ -176,13 +178,21 @@ memset:
 // Not available usually when __riscv is defined:
 #define RCP_MASK_TRUE   0xa500a500u
 
-.global s_native_api_validate_ns_buffer
-s_native_api_validate_ns_buffer:
+.global s_native_validate_ns_buffer_internal
+s_native_validate_ns_buffer_internal:
+    // Return the addr that was passed in. This is just a0 -> a0, so nothing to do.
+
+    // add a1 in the high half of the 64 bit return
     // This should really be RCP_MASK_TRUE but we only branch on the sign bit.
     // The full bit pattern is only checked by real RCP instructions.
-    li a4, -1
-    sw a4, (a3)
-    // Return the addr that was passed in. This is just a0 -> a0, so nothing to do.
+    //
+    // note that the ARM version also:
+    //
+    // 1. sets the flags based on `tst r1, r1`; since this is the only native function that sets flags
+    // we do that for all functions in bootrom_call_native_and_bx_lr
+    // 2. sets r3 to the size; for space reasons we don't do this; this r3 value
+    // is only used in asserts so isn't required on RISC-V
+    li a1, -1
     ret
 
 // This is just the loop part, which is punted to native code for performance

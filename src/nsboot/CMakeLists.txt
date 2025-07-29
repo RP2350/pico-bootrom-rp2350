@@ -87,7 +87,7 @@ if (NSBOOT_BUILD)
             nsboot_init_armv6m_pointers/d1
             nsboot_uart_putc/1
             nsboot_uart_getc/1
-            _str_rpi_1/d1
+            _str_rpi_2/d1
             capacity_resp/d1
             format_capacity_resp/d1
             msc_in_on_stall_change/1
@@ -156,7 +156,7 @@ if (NSBOOT_BUILD)
             hardware_resets_headers
             hardware_sync_headers
             pico_platform_headers
-            pico_bootrom_headers
+            boot_bootrom_headers
             boot_uf2_headers
             boot_picoboot_headers
             boot_picobin_headers

@@ -610,6 +610,7 @@ static bool _update_current_uf2_info(struct uf2_block *uf2, uint32_t family_id, 
                     goto ignore;
                 }
             } else {
+                sc_or_varm_connect_internal_flash();
                 int pi = sc_or_varm_ram_trash_get_uf2_target_partition(&partition, family_id);
                 if (pi < 0) {
                     printf("  family_id %08x is not accepted according to pt\n", family_id);
@@ -704,20 +705,117 @@ static bool _update_current_uf2_info(struct uf2_block *uf2, uint32_t family_id, 
 // note caller must pass SECTOR_SIZE buffer
 bool vd_write_block(uint32_t token, __unused uint32_t lba, aligned4_uint8_t *buf __comma_removed_for_space(uint32_t buf_size)) {
     struct uf2_block *uf2 = (struct uf2_block *) buf;
-    if (uf2->magic_start0 == UF2_MAGIC_START0 && uf2->magic_start1 == UF2_MAGIC_START1 &&
-        uf2->magic_end == UF2_MAGIC_END) {
-        if (uf2->flags & UF2_FLAG_FAMILY_ID_PRESENT &&
-            !(uf2->flags & UF2_FLAG_NOT_MAIN_FLASH) && uf2->payload_size == 256) {
-            if (_update_current_uf2_info(uf2, uf2->file_size, token)) {
-                // if we have a valid uf2 page, write it
-                return _write_uf2_page();
-            }
-        } else {
-            uf2_debug("Sector %d: ignoring write of no family or non 256 bytes sector\n", (uint) lba);
-        }
-    } else {
+#if !ASM_SIZE_HACKS
+    if (uf2->magic_start0 != UF2_MAGIC_START0 || uf2->magic_start1 != UF2_MAGIC_START1 || uf2->magic_end != UF2_MAGIC_END) {
         uf2_debug("Sector %d: ignoring write of non UF2 sector\n", (uint) lba);
+        return false;
     }
+    if ((uf2->flags & (UF2_FLAG_FAMILY_ID_PRESENT | UF2_FLAG_NOT_MAIN_FLASH)) != (uf2->flags & (UF2_FLAG_FAMILY_ID_PRESENT))
+        || uf2->payload_size != 256) {
+        uf2_debug("Sector %d: ignoring write of no family or non 256 bytes sector\n", (uint) lba);
+        return false;
+    }
+    if ((uf2->flags & UF2_FLAG_EXTENSION_FLAGS_PRESENT) && *(uint32_t*)&buf[offsetof(struct uf2_block, data) + 256] == UF2_EXTENSION_RP2_IGNORE_BLOCK) {
+        uf2_debug("Sector %d: ignoring IGNORE_BLOCK tagged sector\n", (uint) lba);
+        return false;
+    }
+    if (_update_current_uf2_info(uf2, uf2->file_size, token)) {
+        // if we have a valid uf2 page, write it
+        return _write_uf2_page();
+    }
+#else
+    __unused uint32_t tmp1, tmp2;
+    __unused struct uf2_block *tmp_uf2 = uf2;
+    static_assert(UF2_FLAG_FAMILY_ID_PRESENT >> 5 == 0x100, "");
+    static_assert(UF2_FLAG_EXTENSION_FLAGS_PRESENT << 16 == 0x80000000, "");
+    pico_default_asm_volatile_goto (
+            // ---------------------
+            // check uf2->magic_start0 == UF2_MAGIC_START0
+            // ---------------------
+            "ldr %[tmp1], [%[uf2], %[magic_start0]]\n"
+            "ldr %[tmp2], =%c[_MAGIC_START0]\n"
+            "cmp %[tmp1], %[tmp2]\n"
+            "bne.n 1f\n"
+            // ---------------------
+            // check uf2->magic_start1 == UF2_MAGIC_START1
+            // ---------------------
+            "ldr %[tmp1], [%[uf2], %[magic_start1]]\n"
+            "ldr %[tmp2], =%c[_MAGIC_START1]\n"
+            "cmp %[tmp1], %[tmp2]\n"
+            "bne.n 1f\n"
+            // ---------------------
+            // check uf2->flags & (UF2_FLAG_FAMILY_ID_PRESENT + UF2_FLAG_NOT_MAIN_FLASH) == UF2_FLAG_FAMILY_ID_PRESENT;
+            // ---------------------
+            "ldr %[tmp2], =%c[_FLAG_FAMILY_ID_PRESENT] + %c[_FLAG_NOT_MAIN_FLASH]\n"
+            "ldr %[tmp1], [%[uf2], %[flags]]\n"
+            "ands %[tmp1], %[tmp1], %[tmp2]\n"
+            "subs %[tmp2], %[_FLAG_NOT_MAIN_FLASH]\n"
+            "cmp %[tmp1], %[tmp2]\n"
+            "bne.n 1f\n"
+            // ---------------------
+            // check uf2->payload_size == 256
+            // ---------------------
+            // static_assert(UF2_FLAG_FAMILY_ID_PRESENT >> 5 == 0x100, "");
+            "lsrs %[tmp2], #5\n"
+            "ldr %[tmp1], [%[uf2], %[payload_size]]\n"
+            "cmp %[tmp1], %[tmp2]\n"
+            "bne.n 1f\n"
+            // ---------------------
+            // check !(uf2->flags & UF2_FLAG_EXTENSION_FLAGS_PRESENT) || !
+            // ---------------------
+            "ldr %[tmp1], [%[uf2], %[flags]]\n"
+            "adds %[uf2], #248\n"
+            // static_assert(UF2_FLAG_EXTENSION_FLAGS_PRESENT << 16 == 0x80000000, "");
+            "lsls %[tmp1], #16\n"
+            "bpl 3f\n"
+            "ldr %[tmp1], [%[uf2], %[extension] - 248]\n"
+            "ldr %[tmp2], =%c[_EXTENSION_RP2_IGNORE_BLOCK]\n"
+            "cmp %[tmp1], %[tmp2]\n"
+            "beq.n 1f\n"
+            "3:\n"
+            "adds %[uf2], #252\n"
+            // check uf2->magic_end == UF2_MAGIC_END
+            "ldr %[tmp1], [%[uf2], %[magic_end] - 500]\n"
+            "ldr %[tmp2], =%c[_MAGIC_END]\n"
+            "cmp %[tmp1], %[tmp2]\n"
+            "beq.n 2f\n"
+            "1:\n"
+            "b %l[fail]\n"
+            ".ltorg\n"
+            "2:\n"
+            : [tmp1] "=&l" (tmp1),
+              [tmp2] "=&l" (tmp2),
+              [uf2] "+l" (tmp_uf2)
+            : [magic_start0] "i" (offsetof(struct uf2_block, magic_start0)),
+            [magic_start1] "i" (offsetof(struct uf2_block, magic_start1)),
+            [magic_end] "i" (offsetof(struct uf2_block, magic_end)),
+            [flags] "i" (offsetof(struct uf2_block, flags)),
+            [payload_size] "i" (offsetof(struct uf2_block, payload_size)),
+            [extension] "i" (offsetof(struct uf2_block, data) + 256),
+            [_MAGIC_START0] "i" (UF2_MAGIC_START0),
+            [_MAGIC_START1] "i" (UF2_MAGIC_START1),
+            [_MAGIC_END] "i" (UF2_MAGIC_END),
+            [_FLAG_FAMILY_ID_PRESENT] "i" (UF2_FLAG_FAMILY_ID_PRESENT),
+            [_FLAG_NOT_MAIN_FLASH] "i" (UF2_FLAG_NOT_MAIN_FLASH),
+            [_EXTENSION_RP2_IGNORE_BLOCK] "i" (UF2_EXTENSION_RP2_IGNORE_BLOCK)
+            : "cc"
+            : fail
+        );
+    if (_update_current_uf2_info(uf2, uf2->file_size, token)) {
+        // if we have a valid uf2 page, write it
+        return _write_uf2_page();
+    }
+    fail:
+    // Redo tests for printf at the end, so we have no code size difference when uf2_debug is a noop
+    if (uf2->magic_start0 != UF2_MAGIC_START0 || uf2->magic_start1 != UF2_MAGIC_START1 || uf2->magic_end != UF2_MAGIC_END) {
+        uf2_debug("Sector %d: ignoring write of non UF2 sector\n", (uint) lba);
+    } else if ((uf2->flags & (UF2_FLAG_FAMILY_ID_PRESENT | UF2_FLAG_NOT_MAIN_FLASH)) != (uf2->flags & (UF2_FLAG_FAMILY_ID_PRESENT))
+        || uf2->payload_size != 256) {
+        uf2_debug("Sector %d: ignoring write of no family or non 256 bytes sector\n", (uint) lba);
+    } else if ((uf2->flags & UF2_FLAG_EXTENSION_FLAGS_PRESENT) && *(uint32_t*)&buf[offsetof(struct uf2_block, data) + 256] == UF2_EXTENSION_RP2_IGNORE_BLOCK) {
+        uf2_debug("Sector %d: ignoring IGNORE_BLOCK tagged sector\n", (uint) lba);
+    }
+#endif
     return false;
 }
 

@@ -91,7 +91,8 @@ enum usb_halt_state {
     HS_NONE = 0,
     HS_NON_HALT_STALL = 1, // just stalled
     HS_HALTED = 2, // halted or command halted
-    HS_HALTED_ON_CONDITION = 3 // halted that cannot be simply cleared by CLEAR_FEATURE
+    HS_HALTED_ON_CONDITION = 3, // halted that cannot be simply cleared by CLEAR_FEATURE
+    NUM_HALT_STATES
 };
 
 struct usb_endpoint {

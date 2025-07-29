@@ -38,9 +38,11 @@ memcpy_function_header
 .thumb_func
 varm_memcpy_44:
 #if FEATURE_CANARIES
-    rcp_count_set_nodelay STEPTAG_VARM_MEMCPY
-#endif
+    rcp_canary_get_nodelay r3, CTAG_ARM8_MEMCPY
+    push {r0, r3, lr}
+#else
     mov ip, r0
+#endif
     subs r2, #3
     // Skip word loop if less than one word
     bls 2f
@@ -84,11 +86,14 @@ varm_memcpy_44:
     bne 3b
 
 4:
-    mov r0, ip
 #if FEATURE_CANARIES
-    rcp_count_check_nodelay STEPTAG_VARM_MEMCPY
-#endif
+    pop {r0, r1, r2}
+    rcp_canary_check_nodelay r1, CTAG_ARM8_MEMCPY
+    bx r2
+#else
+    mov r0, ip
     bx lr
+#endif
 
 #else
 #if FEATURE_CANARIES
@@ -418,12 +423,14 @@ s_native_step_safe_crit_mem_erase_by_words_impl:
     rcp_canary_get_nodelay ip, CTAG_S_NATIVE_CRIT_MEM_ERASE_BY_WORDS_IMPL
     mov r3, r0
     cbz r2, 2f
-    add r2, r3
+    add r2, r0
     # note that this function is a substitute for memest; r1 is always passed (as 0)
 1:
     stmia r0!, {r1}
     cmp r0, r2
     blo 1b
+    blo 1b
+    ands r0, r2
 2:
     subs r0, r3
     rcp_canary_check_nodelay ip, CTAG_S_NATIVE_CRIT_MEM_ERASE_BY_WORDS_IMPL

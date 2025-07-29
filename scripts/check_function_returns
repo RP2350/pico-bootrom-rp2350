@@ -23,9 +23,8 @@ KNOWN_EXCEPTIONS = [
 	# function body ends with an rcp_check_step and is handwritten:
 	"varm_noop",
 
-	# This is actually s_varm_riscv_hx_get_boot_flag_impl, which has been
-	# punted into .rodata (XN and NS) because it's only executed on RISC-V
-	"__start_of_secure_xn",
+	# This has been punted into .rodata (XN and NS) because it's only executed on RISC-V
+	"s_varm_riscv_hx_get_boot_flag_impl",
 
 	# This is 3-instruction function that spins until r0 wraps 0. As it
 	# doesn't pop the stack it's not easy to use as part of a chain.

@@ -34,7 +34,7 @@
 #ifndef __ASSEMBLER__
 #include "nsboot_config.h"
 #include "boot/picoboot.h"
-#include "pico/bootrom_constants.h"
+#include "boot/bootrom_constants.h"
 
 // sc_or_varm_ is a SG into secure on ARM and a continuation to an ARM func still under varmulet on RISC-V
 // sc_or_native_ is a SG into secure on ARM and a call into a native RISC-V function on RISC-V

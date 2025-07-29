@@ -106,8 +106,9 @@ static __force_inline bool s_varm_flashperm_partition_num_has_permissions(int pa
 #if BOOTROM_ASSERT_FLASH_PERMISSIONS_ENABLE // because of need for include
         bootrom_assert(FLASH_PERMISSIONS, inline_s_is_resident_partition_table_loaded());
 #endif
-        if (partition_num >= 0 && partition_num < bootram->always.partition_table.permission_partition_count) {
-            return s_varm_flashperm_partition_has_permissions(bootram->always.partition_table.partitions[partition_num],
+		resident_partition_table_t *pt = __get_opaque_ptr(&bootram->always.partition_table);
+        if (partition_num >= 0 && partition_num < pt->permission_partition_count) {
+            return s_varm_flashperm_partition_has_permissions(pt->partitions[partition_num],
                                                               required_permissions);
         } else {
             return false;

@@ -21,6 +21,7 @@ set(VARM_SOURCE_FILES
         ${CMAKE_CURRENT_LIST_DIR}/varm_otp.c
         ${CMAKE_CURRENT_LIST_DIR}/varm_launch_image.c
         ${CMAKE_CURRENT_LIST_DIR}/varm_s_from_nsboot_wrappers.c
+        ${CMAKE_CURRENT_LIST_DIR}/varm_s_from_ns_hardened_buffer_wrappers.S
 )
 set(ARM8_SOURCE_FILES
         ${CMAKE_CURRENT_LIST_DIR}/arm8_bootrom_rt0.S
@@ -28,8 +29,8 @@ set(ARM8_SOURCE_FILES
         ${CMAKE_CURRENT_LIST_DIR}/arm8_s_from_ns_wrappers.c
         ${CMAKE_CURRENT_LIST_DIR}/arm8_secure_gateways.S
         ${CMAKE_CURRENT_LIST_DIR}/arm8_sig.c
-        ${CMAKE_CURRENT_LIST_DIR}/arm8_nsboot_vm.c
-        ${CMAKE_CURRENT_LIST_DIR}/arm8_validate_ns_buffer.c
+        ${CMAKE_CURRENT_LIST_DIR}/arm8_nsboot_vm.S
+        ${CMAKE_CURRENT_LIST_DIR}/arm8_validate_ns_buffer.S
         )
 target_sources(bootrom_raw PRIVATE
         ${VARM_SOURCE_FILES}
@@ -55,15 +56,20 @@ target_include_directories(bootrom_raw PRIVATE
 # we will use the ordering here along with the nsboot_raw.sym output to replace
 # 'movw rx, 0xbb00 + ord` with `movw rx, 16_bit_address_of(ord)`
 set(P16_TARGETS
-        __start_of_secure_xn_plus_5/d1
-        sonly_text_end/d2
+        #__start_of_secure_xn/d1
+        sonly_text_end/d1
+        sonly_text_end_plus_7/d1
         s_native_default_xip_setup/d1
-        _end_of_core1_boot_path_roundup_32_plus_1/d1
-        #bootrom_xip_mode_cfgs/d1
+        _end_of_core1_boot_path_roundup_32_plus_5/d1
+        #bootrom_xip_mode_cfgs/d1t
         otp_ecc_parity_table/d1
         sg_api_table/d1
         rq_cq_seq_table/d1
         sb_fe_one/d1
+        varm_from_nsboot_func_table/d1
+        #sau_rlar/d1
+        s_varm_api_get_sys_info/1
+        s_varm_api_get_partition_table_info/1
 )
 
 set(P16_ASSERTS "")
@@ -96,7 +102,10 @@ target_compile_definitions(bootrom_raw PRIVATE
         TAIL_CALL_HACKS=1
         PICO_SECURE=1
         PICO_NO_FPGA_CHECK=0
-        )
+        PICO_USE_GPIO_COPROCESSOR=0 # don't want copro instructions in varmuleted code
+        # note that you also have to make corresponding changes to P16_TARGETS if you change these
+        #NO_EXTRA_SAU_MPU_CHECKS=1
+)
 
 if (BOOTROM_HARDENING)
     target_compile_definitions(bootrom_raw PRIVATE BOOTROM_HARDENING=1)
@@ -154,6 +163,7 @@ add_custom_command(OUTPUT ${BOOTROM_ELF}
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/inject_p16 $<TARGET_FILE:bootrom_raw> ${CMAKE_BINARY_DIR}/bootrom.sym ${BOOTROM_ELF} ${P16_TARGETS}
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/inject_rcp_consts ${BOOTROM_ELF} ${BOOTROM_ELF}
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/overwrite_prolog ${BOOTROM_ELF} ${CMAKE_BINARY_DIR}/bootrom.sym ${BOOTROM_ELF}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/remove_rcp_delays ${BOOTROM_ELF} ${BOOTROM_ELF}
         VERBATIM)
 
 add_custom_target(bootrom ALL DEPENDS ${BOOTROM_ELF})

@@ -54,34 +54,53 @@ int __noinline s_varm_crit_update_rbit3(uint row, uint bit) {
     canary_exit_return(S_VARM_CRIT_UPDATE_RBIT3, rc);
 }
 
+static_assert(REBOOT2_FLAG_REBOOT_TYPE_PC_SP & 8, "");
 #if !ASM_SIZE_HACKS
-int s_varm_crit_redo_last_reboot(uint32_t flags) {
+int s_varm_crit_redo_last_reboot_trash_r4_r5(uint32_t flags) {
     flags |= bootram->always.boot_type | REBOOT2_FLAG_NO_RETURN_ON_SUCCESS;
     uint32_t *params = __get_opaque_ptr(bootram->always.zero_init.reboot_params.e);
-    return s_varm_api_reboot(flags, BOOTROM_SHORT_REBOOT_MS, params[0], params[1]);
+    // ~8 to hamper PC_SP
+    return s_varm_api_reboot(flags & ~8, BOOTROM_SHORT_REBOOT_MS, params[0], params[1]);
 }
 #else
 static_assert(sizeof(bootram->always.boot_type)==1, "");
-static_assert(REBOOT2_FLAG_NO_RETURN_ON_SUCCESS >= 0x100, ""); // needs mov.w
-int __attribute__((naked)) s_varm_crit_redo_last_reboot(__unused uint32_t flags) {
+static_assert(BOOTROM_SHORT_REBOOT_MS == 1, "");
+static_assert(REBOOT2_FLAG_NO_RETURN_ON_SUCCESS == (BOOTROM_SHORT_REBOOT_MS << 8), "");
+int __attribute__((naked)) s_varm_crit_redo_last_reboot_trash_r4_r5(__unused uint32_t flags) {
     pico_default_asm_volatile(
-            "movw r2, %[reboot2_flag_no_return_on_success]\n"
+            "movs r1, #1\n"
+            "lsls r2, r1, #8\n"
             "orrs r0, r2\n"
-            "ldr r1, =%[reboot_params]\n"
-            "ldmia r1!, {r2, r3}\n"
-            "adds r1, %[boot_type_minus_reboot_params] - 8\n"
-            "ldrb r1, [r1]\n"
-            "orrs r0, r1\n"
-            "movs r1, %[short_reboot_ms]\n"
-            "b.n s_varm_api_reboot\n"
+            "ldr r4, =%[reboot_params]\n"
+            "ldmia r4!, {r2, r3, r5}\n" // note dummy read of r5 to allow an < 16 offset for the byte load
+            "ldrb r4, [r4, %[boot_type_minus_reboot_params_minus_12]]\n"
+            "orrs r0, r4\n"
+            // we want to avoid PC_SP as r0 which has bit 3 set
+            "movs r4, #8\n"
+            "tst r0, r4\n"
+            // skipping any of the above instructions check instructions, I think, should leave Z == 0
+            // note we are trying to avoid a ROP target of say the ldmia above
+            "beq.n s_varm_api_reboot\n"
             :
             : [reboot_params] "i" (bootram->always.zero_init.reboot_params.e),
-              [boot_type_minus_reboot_params] "i" (offsetof(bootram_t, always.boot_type) - offsetof(bootram_t, always.zero_init.reboot_params)),
+              [boot_type_minus_reboot_params_minus_12] "i" (offsetof(bootram_t, always.boot_type) - offsetof(bootram_t, always.zero_init.reboot_params) - 12),
               [short_reboot_ms] "i" (BOOTROM_SHORT_REBOOT_MS),
               [reboot2_flag_no_return_on_success] "i" (REBOOT2_FLAG_NO_RETURN_ON_SUCCESS)
             );
+    rcp_panic();
 }
 #endif
+
+__force_inline int s_varm_crit_redo_last_reboot(uint32_t flags) {
+    register int r0 asm ("r0") = (int)flags;
+    pico_default_asm_volatile (
+            "bl s_varm_crit_redo_last_reboot_trash_r4_r5\n"
+    : "+l" (r0)
+    :
+    :  "r1", "r2", "r3", "r4", "r5", "lr", "cc", "memory"
+    );
+    return r0;
+}
 
 int s_varm_crit_buy_update_otp_version(__unused bool explicit) {
     canary_entry(S_VARM_CRIT_BUY_UPDATE_OTP_VERSION);
@@ -277,23 +296,38 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
     if (!image_def->rolled_entry_point_addr) {
         // note: check image_type not current boot cpu to clarify printfs as much as anything... if it
         // is the wrong CPU it won't be booted anyway, so whatever we set doesn't matter
+        register uint32_t new_sp asm ("r0");
+        register uint32_t new_pc asm ("r1") = 0;
         if (inline_s_executable_image_def_cpu_type(image_def) != PICOBIN_IMAGE_TYPE_EXE_CPU_RISCV) {
-            uintptr_t vector_table_addr = image_def->rolled_vector_table_addr;
-            // we don't check alignment of the vtable for size; if it is bad, it is bad at this point.
-            printf("initializing ARM entry point from vtable at %08x\n", (uint)vector_table_addr);
-            static_assert(offsetof(parsed_image_def_t, rolled_entry_point_addr) ==
-                          offsetof(parsed_image_def_t, initial_sp) + 4, "");
             // Note ctx->window_base has been rolled, so for flash images we read through a
             // translating XIP alias. Cached is fine: we should have flushed during verification.
-            void *sp_pc_src = (void*)(vector_table_addr);
-            static_assert(offsetof(parsed_image_def_t, rolled_entry_point_addr) == offsetof(parsed_image_def_t, initial_sp) + 4, "");
-            s_varm_crit_mem_copy_by_words(&image_def->initial_sp, sp_pc_src, 8);
+            uintptr_t src = image_def->rolled_vector_table_addr;
+            // we don't check alignment of the vtable for size; if it is bad, it is bad at this point.
+            printf("initializing ARM entry point from vtable at %08x\n", src);
+            pico_default_asm_volatile(
+                "ldmia %0!, {%[new_sp], %[new_pc]}\n"
+                : "+l" (src), [new_sp] "+l" (new_sp), [new_pc] "+l" (new_pc)
+                );
         } else {
-            // default to start of image
-            image_def->rolled_entry_point_addr = image_base_vma;
-            image_def->initial_sp = INVALID_STACK_PTR;
+            // default PC to start of image (note we use asm for the assignment to keep the new_pc = 0 in the common path above
+            pico_default_asm_volatile(
+                "mov %0, %1\n"
+                : "+l" (new_pc)
+                : "r" (image_base_vma)
+                );
+            new_sp = INVALID_STACK_PTR;
         }
-        image_def->initial_sp_limit = 0;
+        rcp_iequal(__get_opaque_ptr(image_def)->rolled_entry_point_addr, 0);
+        static_assert(offsetof(parsed_image_def_t, rolled_entry_point_addr) ==
+                      offsetof(parsed_image_def_t, initial_sp) + 4, "");
+        static_assert(offsetof(parsed_image_def_t, initial_sp_limit) ==
+                      offsetof(parsed_image_def_t, initial_sp) + 8, "");
+        uintptr_t dest = (uintptr_t)&image_def->initial_sp;
+        pico_default_asm_volatile(
+            "stmia %0!, {%[new_sp], %[new_pc], %[zero]}\n"
+            : "+l" (dest), [new_sp] "+l" (new_sp), [new_pc] "+l" (new_pc)
+            : [zero] "l" (0)
+            );
     }
 #if MINI_PRINTF
     printf("Launch IMAGE_DEF (note: flash address is rolled when rolling):\n");
@@ -330,8 +364,8 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
     hx_check_step(STEPTAG_S_VARM_CRIT_RAM_TRASH_LAUNCH_IMAGE_BASE);
     hx_assert_true(is_image_def_verified(image_def));
     // if secure, then sig_key_match must be true
-    hx_assert_notx_orx_true(always->secure, hx_bit_pattern_xor_secure(),
-                             image_def->core.sig_otp_key_match_and_block_hashed, hx_bit_pattern_xor_key_match());
+    hx_assert_notx_orx_true_dup_checked(always->secure, hx_bit_pattern_xor_secure(),
+                                        image_def->core.sig_otp_key_match_and_block_hashed, hx_bit_pattern_xor_key_match());
     // don't think this is super necessary
 //    hx_assert_equal2i(image_def->image_type_flags & PICOBIN_IMAGE_TYPE_EXE_CHIP_BITS, PICOBIN_IMAGE_TYPE_EXE_CHIP_AS_BITS(RP2350));
     hx_check_step(STEPTAG_S_VARM_CRIT_RAM_TRASH_LAUNCH_IMAGE_MID_CHECK);
@@ -340,9 +374,9 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
     // note we don't verify signature in non-secure mode, so signature_verified will be false
     // note, this check also makes sure that we didn't try to boot an image which we verified
     // with ctx->verify_without_signatures == true
-    hx_assert_bequal(hx_xbool_to_bool(always->secure, hx_bit_pattern_xor_secure()),
+    hx_assert_bequal_dup(hx_xbool_to_bool(always->secure, hx_bit_pattern_xor_secure()),
                       hx_xbool_to_bool(is_image_def_signature_verifiedx(image_def), hx_bit_pattern_xor_sig_verified()));
-    hx_assert_or(has_rollback_version, hx_notx_constant_diff(secure_and_need_rollback_version, boot_flag_selector(OTP_DATA_BOOT_FLAGS0_ROLLBACK_REQUIRED_LSB), hx_bit_pattern_xor_secure()));
+    hx_assert_or_dup(has_rollback_version, hx_notx_constant_diff(secure_and_need_rollback_version, boot_flag_selector(OTP_DATA_BOOT_FLAGS0_ROLLBACK_REQUIRED_LSB), hx_bit_pattern_xor_secure()));
     hx_check_step(STEPTAG_S_VARM_CRIT_RAM_TRASH_LAUNCH_IMAGE_POST_CHECK);
 
     *ctx->diagnostic = BOOT_DIAGNOSTIC_IMAGE_LAUNCHED;
@@ -406,9 +440,12 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
                                                                            image_def->rolled_entry_point_addr,
                                                                            image_def->initial_sp,
                                                                            image_def->initial_sp_limit,
-                                                                           image_def->rolled_vector_table_addr);
+                                                                           image_def->rolled_vector_table_addr,
+                                                                           parsed_block_loop);
         rcp_panic();
     } else {
+#if FEEATURE_EXEC2
+#error no longer supported
         hx_assert_false(ctx->booting);
         hx_assert_false(hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_EXEC2_BITS));
 
@@ -425,6 +462,7 @@ int s_varm_crit_ram_trash_verify_and_launch_image(boot_scan_context_t *ctx, pars
             varm_to_s_native_secure_call_pc_sp(image_def->rolled_entry_point_addr,
                                          image_def->initial_sp);
         }
+#endif
     }
     rc = BOOTROM_OK;
     verify_and_launch_image_done:
@@ -440,9 +478,9 @@ int s_varm_crit_ram_trash_checked_ram_or_flash_window_launch(boot_scan_context_t
     int rc = BOOTROM_ERROR_INVALID_ADDRESS;
     bool inside_out = upper_e < upper_s;
     bool within_32meg_naturally_aligned = (upper_s >> 25) == (upper_e >> 25);
-    bool within_xip = (upper_s >> 25) == (upper_e >> 25) && (upper_s >> 25) == (XIP_BASE >> 25);
-    bool within_ram = varm_is_sram_or_xip_ram(upper_s) && varm_is_sram_or_xip_ram(upper_e);
-    if (!inside_out && within_32meg_naturally_aligned && (within_xip || within_ram)) {
+    bool starts_within_xip = (upper_s >> 25) == (XIP_BASE >> 25);
+    bool within_ram = call_varm_is_sram_or_xip_ram(upper_s) && call_varm_is_sram_or_xip_ram(upper_e);
+    if (!inside_out && within_32meg_naturally_aligned && (starts_within_xip || within_ram)) {
         parsed_block_loop_t *parsed_block_loop = &ctx->scan_workarea->parsed_block_loops[0];
         // we never look for partition tables when launching an image from a window
         ctx->dont_scan_for_partition_tables = hx_true();
@@ -473,7 +511,18 @@ int s_varm_crit_ram_trash_checked_ram_or_flash_window_launch(boot_scan_context_t
                 rc = s_varm_crit_ram_trash_verify_and_launch_image(ctx, parsed_block_loop);
             }
             bootrom_assert(IMAGE_BOOT, rc);
+#if !ASM_SIZE_HACKS
             *ctx->diagnostic = BOOT_DIAGNOSTIC_IMAGE_CONDITION_FAILURE;
+#else
+            uint tmp;
+            pico_default_asm_volatile(
+                "movw %[tmp], %[image_condition_failure]\n"
+                "strh %[tmp], [%[diagnostic]]\n"
+                : [tmp] "=&l" (tmp)
+                : [diagnostic] "l" (ctx->diagnostic), [image_condition_failure] "i" (BOOT_DIAGNOSTIC_IMAGE_CONDITION_FAILURE)
+                : "cc"
+                );
+#endif
         } else {
             rc = BOOTROM_ERROR_NOT_FOUND;
         }

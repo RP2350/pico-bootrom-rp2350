@@ -28,7 +28,7 @@
 #define HINT_s_native_crit_flash_put_get                                10
 #define HINT_s_native_busy_wait_at_least_cycles                         11
 #define HINT_s_native_crit_init_default_xip_setup_and_enter_image_thunk 12
-#define HINT_s_native_api_validate_ns_buffer                            13
+#define HINT_s_native_validate_ns_buffer_internal                       13
 #define HINT_native_memcpy                                              14
 #define HINT_native_memset                                              15
 // these could have been regular hints above, but we have run out, so these
@@ -48,17 +48,17 @@
 
 #define RISCV_REDIRECT_HINT(func) varm_hint HINT_##func
 
-.macro VARM_TO_PREAMBLE_raw func, num
-.section .text.varm_to_\()\func
-.global varm_to_\()\func
-.thumb_func
-varm_to_\()\func:
-varm_hint \num
-.p2align 2
-    // fall thru to impl
-.endm
-
-#define VARM_TO_PREAMBLE(func) VARM_TO_PREAMBLE_raw func, HINT_##func
+// .macro VARM_TO_PREAMBLE_raw func, num
+// .section .text.varm_to_\()\func
+// .global varm_to_\()\func
+// .thumb_func
+// varm_to_\()\func:
+// varm_hint \num
+// .p2align 2
+//     // fall thru to impl
+// .endm
+//
+// #define VARM_TO_PREAMBLE(func) VARM_TO_PREAMBLE_raw func, HINT_##func
 
 .macro VARM_TO_MULTIPLEX_PREAMBLE_raw func, num
 .section .text.varm_to_\()\func

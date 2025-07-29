@@ -193,7 +193,7 @@ nsboot_uart_echo_cmd:
 nsboot_uart_putc:
     ldr r1, [r7, #UART_UARTFR_OFFSET]
     lsrs r1, #(UART_UARTFR_TXFF_LSB + 1)
-    bcs nsboot_uart_putc
+    bcs.n nsboot_uart_putc
     strb r0, [r7, #UART_UARTDR_OFFSET]
     bx lr
 
@@ -204,7 +204,7 @@ nsboot_uart_putc:
 nsboot_uart_getc:
     ldr r0, [r7, #UART_UARTFR_OFFSET]
     lsrs r0, #(UART_UARTFR_RXFE_LSB + 1)
-    bcs nsboot_uart_getc
+    bcs.n nsboot_uart_getc
     ldrb r0, [r7, #UART_UARTDR_OFFSET]
     bx lr
 

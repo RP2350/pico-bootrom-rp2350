@@ -15,21 +15,21 @@ int __noinline s_varm_flashperm_get_partition_num_from_storage_address(storage_a
     canary_entry(S_VARM_FLASHPERM_GET_PARTITION_NUM_FROM_STORAGE_ADDRESS);
 	// We are dealing with flash storage addresses, i.e., the SPI wire-level address plus the XIP
 	// hardware base address for that chip select. So, subtract the XIP hardware base address.
-	addr -= XIP_BASE;
-    int rc;
+	uint32_t small = __get_opaque_value(XIP_BASE >> 24);
+	addr -= (small << 24);
+    register int rc asm ("r0");
 
 	// If the address is outside the bounds of known flash hardware (as configured by
 	// OTP_DATA_FLASH_DEVINFO) then don't even bother to walk the table. The default if the
 	// FLASH_DEVINFO_ENABLE flag is not set is 16 MiB for the first chip select, and nothing on the
 	// second chip select.
-	if (!s_varm_flash_check_in_bounds_single_addr(addr)) {
-        rc = -1;
-        goto from_storage_address_done;
-	}
-
+	rc = s_varm_flash_check_in_bounds_single_addr(addr);
     // If we don't know anything then we can't give permission for anything
-    if (!inline_s_is_resident_partition_table_loaded()) {
-        rc = -1;
+	rc &= inline_s_is_resident_partition_table_loaded();
+    if (!rc) {
+    	pico_default_asm(
+    		"subs %0, #1\n"
+    		: "+l" (rc));
         goto from_storage_address_done;
     }
 

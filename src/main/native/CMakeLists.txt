@@ -20,7 +20,7 @@ target_link_libraries(bootrom_common INTERFACE
         boot_uf2_headers
         boot_picoboot_headers
         boot_picobin_headers
-        pico_bootrom_headers
+        boot_bootrom_headers
         pico_platform_headers
         )
 

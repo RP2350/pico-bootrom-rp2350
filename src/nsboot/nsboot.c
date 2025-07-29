@@ -12,9 +12,6 @@
 #include "hardware/regs/intctrl.h"
 #include "hardware/structs/scb.h"
 #if USE_BOOTROM_GPIO
-#include "hardware/structs/iobank0.h"
-#include "hardware/structs/padsbank0.h"
-#include "hardware/gpio.h"
 #include "boot/picoboot.h"
 #endif
 #include "nsboot_secure_calls.h"
@@ -130,39 +127,6 @@ void __attribute__((noreturn)) go(void) {
     }
     _nsboot_usb_client();
 }
-
-#if USE_BOOTROM_GPIO
-
-void gpio_setup(void) {
-    if (nsboot_config->usb_activity_pin >= 0) {
-        uint gpio = (uint)nsboot_config->usb_activity_pin;
-
-        gpio_set_dir(gpio, 1);
-        // Set input enable on, output disable off
-        hw_write_masked(&padsbank0_hw->io[gpio],
-                        PADS_BANK0_GPIO0_IE_BITS,
-                        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
-        );
-        // Zero all fields apart from fsel; we want this IO to do what the peripheral tells it.
-        // This doesn't affect e.g. pullup/pulldown, as these are in pad controls.
-        uint ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
-        if (nsboot_config->bootsel_flags & BOOTSEL_FLAG_GPIO_PIN_ACTIVE_LOW) {
-            ctrl |= IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_INVERT << IO_BANK0_GPIO0_CTRL_OUTOVER_LSB;
-        }
-        iobank0_hw->io[gpio].ctrl = ctrl;
-        // Remove pad isolation now that the correct peripheral is in control of the pad
-        hw_clear_bits(&padsbank0_hw->io[gpio], PADS_BANK0_GPIO0_ISO_BITS);
-    }
-#ifndef NDEBUG
-    // Set to RIO for debug
-    for (int i = 19; i < 23; i++) {
-        gpio_init(i);
-        gpio_set_dir_out_masked(1 << i);
-    }
-#endif
-}
-
-#endif
 
 void __attribute__((noreturn)) bootrom_assertion_failure(__unused const char *fn, __unused uint line) {
 #if MINI_PRINTF

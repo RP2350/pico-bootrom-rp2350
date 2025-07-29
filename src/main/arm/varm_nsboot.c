@@ -20,6 +20,11 @@
 #include "hardware/structs/ticks.h"
 #include "hardware/structs/usb.h"
 #include "hardware/structs/xosc.h"
+#if USE_BOOTROM_GPIO
+#include "hardware/structs/iobank0.h"
+#include "hardware/structs/padsbank0.h"
+#include "hardware/gpio.h"
+#endif
 
 #if defined(__ARM_ARCH_8M_MAIN__) || !defined(__ARM_ARCH_8M_BASE__)
 #error this must be compiled with armv8m-base
@@ -42,20 +47,20 @@ static int s_varm_crit_ram_trash_find_uf2_target_partition(uf2_target_workarea_t
 // nsboot. This function is assumed to run after a full reset of the
 // oscillators, PLLs and clock generators.
 //
-// This means that initially:
+// This means that initially (as of silicon version A3):
 //
-// - ROSC is running, at approximately 12 MHz
+// - ROSC is running, at approximately 48 MHz (12 at reset; increased 4x early in varm_boot_path)
 // - XOSC is not running
 // - PLLs are not running
-// - clk_ref is running from ROSC with div=1
-// - clk_sys is chained from clk_ref with div=1
+// - clk_ref is running from ROSC with div=4 (1 at reset; increased 4x early in varm_boot_path)
+// - clk_sys is running from ROSC with div=1 (*not* chained from clk_ref; hardware difference from A2 -> A3)
 // - clk_usb is disabled, selects USB PLL, div=1
 
-static __force_inline void s_varm_nsboot_clock_setup(void) {
-    // May as well set up the clk_ref divisor immediately -- gives some
-    // tolerance of accidental ROSC glitches.
-    clocks_hw->clk[clk_ref].div = 2 << CLOCKS_CLK_REF_DIV_INT_LSB;
-    (void)clocks_hw->clk[clk_ref].div;
+static __force_inline void s_varm_nsboot_clock_setup(uint32_t pll_reset_mask) {
+    // The final clk_ref divisor for NSBOOT (=2) is less than the initial
+    // divisor, so we don't touch it until the end.
+
+    s_varm_step_safe_reset_unreset_block_wait_noinline(pll_reset_mask);
 
     hx_bool otp_osc_pll_setup_valid = hx_step_safe_get_boot_flag(
             OTP_DATA_BOOT_FLAGS0_ENABLE_BOOTSEL_NON_DEFAULT_PLL_XOSC_CFG_LSB
@@ -83,8 +88,6 @@ static __force_inline void s_varm_nsboot_clock_setup(void) {
     }
     while (!(xosc_hw->status & XOSC_STATUS_STABLE_BITS));
 
-    s_varm_step_safe_reset_unreset_block_wait_noinline(RESETS_RESET_PLL_USB_BITS);
-
     // Default USB PLL setup for 12 MHz crystal:
     // - VCO freq 1200 MHz, so feedback divisor of 100. Range is 750 MHz to 1.6 GHz
     // - Postdiv1 of 5, down to 240 MHz (appnote recommends postdiv1 >= postdiv2)
@@ -111,12 +114,18 @@ static __force_inline void s_varm_nsboot_clock_setup(void) {
 
     pll_usb_hw->cs = pll_refdiv << PLL_CS_REFDIV_LSB;
     pll_usb_hw->fbdiv_int = pll_fbdiv;
-    pll_usb_hw->prim =
-            (pll_postdiv1 << PLL_PRIM_POSTDIV1_LSB) |
-            (pll_postdiv2 << PLL_PRIM_POSTDIV2_LSB);
+    // (delay for output synchroniser on fbdiv_int -- should be fine if you
+    // poll for LOCK, but trips an assert on the PLL model.)
+    (void)pll_usb_hw->fbdiv_int;
+    uint32_t prim_bits =
+        (pll_postdiv1 << PLL_PRIM_POSTDIV1_LSB) |
+        (pll_postdiv2 << PLL_PRIM_POSTDIV2_LSB);
+    pll_usb_hw->prim = prim_bits;
 
-    // Power up, wait for lock (note these are all power-*down* bits)
-    pll_usb_hw->pwr = 0;
+    // Power up, wait for lock (note these are all power-*down* bits).
+    // We want to write zero but we already have a close-enough value:
+    static_assert((PLL_PRIM_BITS & PLL_PWR_BITS) == 0);
+    pll_usb_hw->pwr = prim_bits;
 
     // PLL may intermittently report lock when XOSC is just floating. Make
     // sure lock stays high for a large consecutive number of reads
@@ -129,10 +138,14 @@ static __force_inline void s_varm_nsboot_clock_setup(void) {
         lock_count &= ((int32_t)pll_usb_hw->cs) >> 31;
     }
 
-    // Glitchy switch of clk_ref, then clk_sys aux to USB PLL output. (Note
-    // clk_usb selects USB PLL by default.)
-    clocks_hw->clk[clk_ref].ctrl = CLOCKS_CLK_REF_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB <<
-                                                                                   CLOCKS_CLK_REF_CTRL_AUXSRC_LSB;
+    // Glitchless switch of clk_sys to chained clk_ref, before we touch its
+    // aux mux. (The write after this one provides delay for the aux side of
+    // the glitchless mux to shut off, before we touch the clk_sys aux mux)
+    clocks_hw->clk[clk_sys].ctrl = CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_ROSC_CLKSRC << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB;
+
+    // Glitchy switch of clk_ref aux, then clk_sys aux to USB PLL output.
+    // (Note clk_usb selects USB PLL by default.)
+    clocks_hw->clk[clk_ref].ctrl = CLOCKS_CLK_REF_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB << CLOCKS_CLK_REF_CTRL_AUXSRC_LSB;
     clocks_hw->clk[clk_sys].ctrl =
             (CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB);
 
@@ -161,8 +174,16 @@ static __force_inline void s_varm_nsboot_clock_setup(void) {
     // now to give the resus logic a chance to kick in if necessary)
     ticks_hw->ticks[TICK_TIMER0].cycles = 24u;
     ticks_hw->ticks[TICK_WATCHDOG].cycles = 24u;
-    ticks_hw->ticks[TICK_TIMER0].ctrl = TICKS_TIMER0_CTRL_ENABLE_BITS;
-    ticks_hw->ticks[TICK_WATCHDOG].ctrl = TICKS_WATCHDOG_CTRL_ENABLE_BITS;
+    static_assert(TICKS_TIMER0_CTRL_ENABLE_BITS == 1, "");
+    static_assert(TICKS_WATCHDOG_CTRL_ENABLE_BITS == 1, "");;
+    uint32_t one = __get_opaque_value(TICKS_TIMER0_CTRL_ENABLE_BITS);
+    ticks_hw->ticks[TICK_TIMER0].ctrl = one; // TICKS_TIMER0_CTRL_ENABLE_BITS
+    ticks_hw->ticks[TICK_WATCHDOG].ctrl = one; // TICKS_WATCHDOG_CTRL_ENABLE_BITS
+
+    // Increase clk_ref to its final speed of 24 MHz (DIV=2, down from initial
+    // value of 5). No need to wait, it will just run slow for a couple more
+    // clk_ref cycles after we change the divisor.
+    clocks_hw->clk[clk_ref].div = one << (CLOCKS_CLK_REF_DIV_INT_LSB + 1);
 }
 
 /**
@@ -172,29 +193,46 @@ static __force_inline void s_varm_nsboot_clock_setup(void) {
  */
 void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_t bootselFlags, uint serial_mode) {
     printf("Entering _nsboot gpio=%08x flags=%02x mode=%d\n", usb_activity_pin, (int)bootselFlags, serial_mode);
-#if 0
-    hw_set_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);
-    hw_clear_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);
-#else
+//    hw_set_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);
+//    hw_clear_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);
+    // we have a lot of constants which are powers of 2, so we pass these thru quite a lot of the top of this function
+    // in r0
+    static_assert((1u << 12) == REG_ALIAS_CLR_BITS - REG_ALIAS_SET_BITS, "");
+    static_assert((1u << 24) == PSM_FRCE_OFF_PROC1_BITS, "");
     io_rw_32 *psm_set = hw_set_alias(&psm_hw->frce_off);
-    *psm_set = PSM_FRCE_OFF_PROC1_BITS;
-    __get_opaque_ptr(psm_set)[(REG_ALIAS_CLR_BITS - REG_ALIAS_SET_BITS)/4] = PSM_FRCE_OFF_PROC1_BITS;
-#endif
+    uint set_to_clr;
+    register uint r0 asm ("r0");
+    pico_default_asm_volatile(
+        "movs %[r0], #1\n"
+        "lsls %[set_to_clr], %[r0], #12\n"
+        "lsls %[r0], #24\n"
+        "str %[r0], [%[psm_set]]\n"
+        "str %[r0], [%[psm_set], %[set_to_clr]]\n"
+        : [set_to_clr] "=&l" (set_to_clr), [r0] "=&l" (r0)
+        : [psm_set] "l" (psm_set)
+        : "cc"
+    );
 
     // Move the varm register file out of USB RAM before we toggle the USB reset. At this point it's
     // ok to trash main RAM, and we only need this register file until we get to native RISC-V code
     // in riscv_nsboot_vm.c, at which point we create a new varmulet instance.
+
+    // r0 is currently PSM_FRCE_OFF_PROC1_BITS
+    static_assert(SRAM_BASE == (PSM_FRCE_OFF_PROC1_BITS << 5), "");
     const uint varm_relocate_opcode = HINT_OPCODE_BASE + 16 * HINT_RELOCATE_VARM_REGISTERS;
     pico_default_asm_volatile (
-        "movs r0, #%c1 >> 24\n"
-        "lsls r0, #24\n"
-        ".hword %c0\n"
-        :
-        : "i" (varm_relocate_opcode), "i" (SRAM_BASE)
-        : "r0", "cc"
+        "lsls r0, #5\n"
+        ".hword %c[op_code]\n"
+        : [r0] "+l" (r0)
+        : [op_code] "i" (varm_relocate_opcode)
+        : "cc"
     );
 
-    s_varm_nsboot_clock_setup();
+    // r0 is now SRAM_BASE
+    static_assert((SRAM_BASE >> (29 - RESETS_RESET_PLL_USB_LSB)) == RESETS_RESET_PLL_USB_BITS);
+    r0 >>= 29 - RESETS_RESET_PLL_USB_LSB;
+    s_varm_nsboot_clock_setup(r0);
+
     s_varm_step_safe_reset_unreset_block_wait_noinline(
         RESETS_RESET_USBCTRL_BITS |
 #if !MINI_PRINTF
@@ -229,24 +267,72 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
     }
 
     // note nothing in nsboot_config can be set before this as nsboot_config is in USB RAM !!!
-    s_varm_step_safe_crit_mem_erase_by_words(USBCTRL_DPRAM_BASE, USBCTRL_DPRAM_SIZE);
-    nsboot_config->chip_id = bootram->always.chip_id;
+    s_varm_step_safe_crit_mem_erase_by_words_const_size(USBCTRL_DPRAM_BASE, USBCTRL_DPRAM_SIZE, true);
+    nsboot_config->chip_id = *struct_member_ptr_shared_base(bootram, always, always.chip_id);
     printf("locking down otp for nsboot\n");
     uint32_t page = 0;
     uint32_t page2 = __get_opaque_value(0u);
-    for(; page < NUM_OTP_PAGES; page++) {
-        uint32_t sw_lock = s_otp_advance_bl_to_s_value(0xff, page);
-        uint32_t sw_lock2 = s_otp_advance_bl_to_s_value(0xff, page2);
-        hx_assert_equal2i(sw_lock, sw_lock2);
+    do {
+        uint32_t sw_lock = call_s_otp_advance_bl_to_s_value(0xff, page); // note top bit must be set in param
+        uint32_t sw_lock2 = call_s_otp_advance_bl_to_s_value(0xcf, page2); // note top bit must be set in param
+        static_assert(OTP_SW_LOCK0_BITS == 0xf, ""); // we rely on the fact that other bits in sw_lock/sw_lock2 are ignored
+#if !ASM_SIZE_HACKS
+        // these are OR writes
         otp_hw->sw_lock[page] = sw_lock;
-        uint32_t sw_lock_verify = otp_hw->sw_lock[page];
+        otp_hw->sw_lock[page] = sw_lock2;
+        hx_assert_equal2i(sw_lock, sw_lock2);
+        uint32_t sw_lock_verify = otp_hw->sw_lock[page] & sw_lock;
+#else
+        uint32_t t0 = page * 4;
+        uint32_t sw_lock_verify = (uintptr_t)&otp_hw->sw_lock[0];
+        pico_default_asm_volatile(
+            // this is an OR write
+            "str %[sw_lock], [%[sw_lock_verify], %[t0]]\n"
+            // this is an OR write
+            "str %[sw_lock2], [%[sw_lock_verify], %[t0]]\n"
+            ".cpu cortex-m33\n"
+            "mcrr p7, #7, %[sw_lock], %[sw_lock2], c0\n" // rcp_iequal
+            ".cpu cortex-m23\n"
+            "ldr %[sw_lock_verify], [%[sw_lock_verify], %[t0]]\n"
+            "ands %[sw_lock_verify], %[sw_lock]\n"
+            : [sw_lock_verify] "+l" (sw_lock_verify), [sw_lock2] "+l" (sw_lock2)
+            : [t0] "l" (t0), [sw_lock] "l" (sw_lock)
+        );
+#endif
 //            printf(" swlock readback %08x\n", (int)sw_lock_verify);
 //        hx_assert_equal2i(sw_lock_verify & sw_lock, sw_lock);
 //        hx_assert_equal2i(sw_lock_verify & OTP_DATA_PAGE0_LOCK1_LOCK_NS_BITS, OTP_DATA_PAGE0_LOCK1_LOCK_NS_BITS);
-        page2 += (sw_lock_verify & sw_lock) == sw_lock;
-    }
+        static_assert(OTP_SW_LOCK0_BITS == 0xf, "");
+        // use get_opaque_value so that compiler does two separate shifts of 28 - it's clever otherwise
+        pico_default_asm_volatile(
+            "adds %[sw_lock2], #1\n"
+            "lsls %[sw_lock2], #28\n"
+            "lsls %[sw_lock_verify], #28\n" // this will clear C, so we subtract an extra 1 below
+            "sbcs %[sw_lock2], %[sw_lock_verify]\n"
+            "lsrs %[sw_lock2], #27\n" // if all is well this will be 1
+            "adds %[page2], %[sw_lock2]\n" // so we can increment page2
+            : [sw_lock_verify] "+l" (sw_lock_verify),
+              [page2] "+l" (page2),
+              [sw_lock2] "+l" (sw_lock2)
+            : [sw_lock] "l" (sw_lock) // keep this alive so we don't share regs
+            :"cc"
+        );
+        // note we don't need to reset this around the loop, since the check increments the value
+        rcp_count_check_nodelay(STEPTAG_S_OTP_ADVANCE_BL_TO_S_VALUE + 1);
+        page++;
+        hx_assert_equal2i(page, page2);
+    } while (page < NUM_OTP_PAGES);
     hx_set_step(STEPTAG_NSBOOT_OTP_ADVANCE);
-    hx_assert_equal2i(page2, NUM_OTP_PAGES);
+    uint32_t num_pages;
+    uint32_t num_pages2;
+    pico_default_asm_volatile(
+        "movs %0, %2\n"
+        "movs %1, %2\n"
+        : "=&l" (num_pages), "=&l" (num_pages2)
+        : "i" (NUM_OTP_PAGES)
+        : "cc");
+    hx_assert_equal2i(page2, num_pages);
+    hx_assert_equal2i(page, num_pages2);
 
     hx_bool disable_usb_msd      = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_MSD_IFC_LSB);
     hx_bool disable_usb_picoboot = hx_step_safe_get_boot_flag(OTP_DATA_BOOT_FLAGS0_DISABLE_BOOTSEL_USB_PICOBOOT_IFC_LSB);
@@ -270,7 +356,7 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
 #endif
         // Need to grant UART + pins to NS *before* attempting to select the UART on the pin, as
         // it's impossible to have a Secure function selected on a NonSecure pin.
-        set_accessctrl_hw->uart[serial_inst] =ACCESSCTRL_PASSWORD_BITS | ACCESSCTRL_UART0_NSP_BITS;
+        set_accessctrl_hw->uart[serial_inst] = ACCESSCTRL_PASSWORD_BITS | ACCESSCTRL_UART0_NSP_BITS;
         // Set up GPIOs now to avoid hassle of passing GPIO numbers to NS code
         set_accessctrl_hw->gpio_nsmask[1] = 0xcu << ACCESSCTRL_GPIO_NSMASK1_QSPI_SD_LSB;
         ioqspi_hw->io[4].ctrl = IO_QSPI_GPIO_QSPI_SD2_CTRL_FUNCSEL_VALUE_UART0_TX <<
@@ -321,9 +407,14 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
             static_assert(OTP_DATA_BOOTSEL_LED_CFG_PIN_MSB < 8, "");
             static_assert((OTP_DATA_BOOTSEL_LED_CFG_BITS & 0xff & ~OTP_DATA_BOOTSEL_LED_CFG_PIN_BITS) == 0, "");
             usb_activity_pin = usbboot_cfg_word;
+#if 0 && GENERAL_SIZE_HACKS // currently doesn't save space
+            static_assert((OTP_DATA_BOOTSEL_LED_CFG_ACTIVELOW_BITS >> 4) == BOOTSEL_FLAG_GPIO_PIN_ACTIVE_LOW, "");
+            bootselFlags |= (usbboot_cfg_word >> 4) & BOOTSEL_FLAG_GPIO_PIN_ACTIVE_LOW;
+#else
             if (usbboot_cfg_word & OTP_DATA_BOOTSEL_LED_CFG_ACTIVELOW_BITS) {
                 bootselFlags |= BOOTSEL_FLAG_GPIO_PIN_ACTIVE_LOW;
             }
+#endif
         }
     }
     // note that nsboot does not check LED related bootselFlags other
@@ -331,6 +422,63 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
     // to disable activity pin
     nsboot_config->usb_activity_pin = (int8_t)usb_activity_pin;
     nsboot_config->bootsel_flags = (uint8_t)bootselFlags;
+#if USE_BOOTROM_GPIO
+    if (nsboot_config->usb_activity_pin >= 0) {
+        uint gpio = (uint)nsboot_config->usb_activity_pin;
+
+        uint32_t mask = 1u << (gpio & 0x1fu);
+#if ASM_SIZE_HACKS
+        sio_hw_t *sio = sio_hw;
+        uint tmp;
+        pico_default_asm_volatile(
+                "lsrs %[tmp], %[gpio], #6\n"
+                "bcc 1f\n"
+                "adds %[sio], #%c[_SIO_GPIO_HI_OE_SET_OFFSET] - %c[_SIO_GPIO_OE_SET_OFFSET]\n"
+                "1:\n"
+                "str %[mask], [%[sio], %[_SIO_GPIO_OE_SET_OFFSET]]\n"
+                : [sio] "+l" (sio), [tmp] "=&l" (tmp)
+                : [mask] "l" (mask), [gpio] "l" (gpio),
+                  [_SIO_GPIO_OE_SET_OFFSET] "i" (SIO_GPIO_OE_SET_OFFSET),
+                  [_SIO_GPIO_HI_OE_SET_OFFSET] "i" (SIO_GPIO_HI_OE_SET_OFFSET)
+                : "cc"
+                );
+#else
+        if (gpio < 32) {
+            sio_hw->gpio_oe_set = mask;
+        } else {
+            sio_hw->gpio_hi_oe_set = mask;
+        }
+#endif
+        // Set input enable off, output disable off
+        pads_bank0_hw->io[gpio] = PADS_BANK0_GPIO0_RESET & ~(PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS);
+        // Zero all fields apart from fsel; we want this IO to do what the peripheral tells it.
+        // This doesn't affect e.g. pullup/pulldown, as these are in pad controls.
+        uint ctrl;
+#if ASM_SIZE_HACKS
+        // GCC has lost its mind below - you'd think loading the value 5 would be simple
+        pico_default_asm_volatile(
+                "movs %0, %1"
+                : "=l" (ctrl)
+                : "i" (GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB)
+                : "cc"
+                );
+#else
+        ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+#endif
+#if GENERAL_SIZE_HACKS
+        static_assert(((IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_INVERT << IO_BANK0_GPIO0_CTRL_OUTOVER_LSB) >> 8) ==
+                              BOOTSEL_FLAG_GPIO_PIN_ACTIVE_LOW, "");
+        ctrl |= (bootselFlags >> 8u) & BOOTSEL_FLAG_GPIO_PIN_ACTIVE_LOW;
+#else
+        if (bootselFlags & BOOTSEL_FLAG_GPIO_PIN_ACTIVE_LOW) {
+            ctrl |= IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_INVERT << IO_BANK0_GPIO0_CTRL_OUTOVER_LSB;
+        }
+#endif
+        iobank0_hw->io[gpio].ctrl = ctrl;
+        // Remove pad isolation now that the correct peripheral is in control of the pad
+        pads_bank0_hw->io[gpio] = PADS_BANK0_GPIO0_RESET & ~(PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS | PADS_BANK0_GPIO0_ISO_BITS);
+    }
+#endif
 
     debug_label(stepx_nsboot_mem_erase);
     // Everything which will become NS-accessible must be cleared:
@@ -339,7 +487,7 @@ void s_varm_crit_nsboot(mpu_hw_t *mpu_on_arm, uint32_t usb_activity_pin, uint32_
     // - USB RAM (IDAU Exempt, ACCESSCTRL NS)
     // USB RAM needs to be cleared anyway, since that's where .bss goes.
     inline_s_set_ram_rw_xn(mpu_on_arm);
-    s_varm_step_safe_crit_mem_erase_by_words(XIP_SRAM_BASE, XIP_SRAM_END - XIP_SRAM_BASE);
+    s_varm_step_safe_crit_mem_erase_by_words_const_size(XIP_SRAM_BASE, XIP_SRAM_END - XIP_SRAM_BASE, true);
 
     // Launch USB boot client either in ARM non-secure mode, or via varmulet
 
@@ -380,6 +528,7 @@ int s_varm_ram_trash_get_uf2_target_partition_workarea(uint32_t family_id, resid
         printf("Family id %08x is %s\n", family_id, default_family_names[family_index]);
     }
 #endif
+    // This gets redundant literals, but making this pointer opaque screws up register allocation:
     resident_partition_table_t *pt = &bootram->always.partition_table;
     int rc;
     if (!pt->partition_count || family_bit == PICOBIN_PARTITION_FLAGS_ACCEPTS_DEFAULT_FAMILY_ABSOLUTE_BITS) {
@@ -473,7 +622,7 @@ static int s_varm_crit_ram_trash_find_uf2_target_partition(uf2_target_workarea_t
     int rc;
     boot_scan_context_t *ctx = &uf2_target_workarea->scan_workarea.ctx_holder.ctx;
     ctx->executable_image_def_only = bootable_only;
-    resident_partition_table_t *pt = &bootram->always.partition_table;
+    resident_partition_table_t *pt = __get_opaque_ptr(&bootram->always.partition_table);
     for (int pi = 0; pi < pt->partition_count; pi++) {
         resident_partition_t *partition_a = pt->partitions + pi;
         if (!inline_s_is_b_partition(partition_a) && inline_s_partition_is_nsboot_writable(partition_a)) {
@@ -543,3 +692,4 @@ static int s_varm_crit_ram_trash_find_uf2_target_partition(uf2_target_workarea_t
     find_uf2_target_partition_done:
     canary_exit_return(S_VARM_CRIT_RAM_TRASH_FIND_UF2_TARGET_PARTITION, rc);
 }
+

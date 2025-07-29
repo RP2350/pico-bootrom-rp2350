@@ -82,7 +82,10 @@ const uint8_t rq_cq_seq_table[N_RQ_CQ_REGS * N_RQ_CQ_SEQ] = {
 // ----------------------------------------------------------------------------
 // SBPI bridge access functions
 
-static void __noinline __sg_filler s_varm_otp_wait_sbpi_done(void) {
+// note this is in SG, but is needed during the boot path if we need to write a rollback version to OTP,
+// so it gets a special attribute, which puts it at the very end of SG, such that we can
+// carve it out of our boot path XN MPU region
+static void __noinline __attribute__((section(".sg_bootpath_needed"))) s_varm_otp_wait_sbpi_done(void) {
     canary_set_step(STEPTAG_S_VARM_OTP_WAIT_SBPI_DONE);
     uint32_t status_mask = OTP_SBPI_STATUS_INSTR_MISS_BITS | OTP_SBPI_STATUS_INSTR_DONE_BITS;
     while (!(otp_hw->sbpi_status & status_mask))
@@ -335,9 +338,15 @@ int __used s_varm_api_hx_otp_access(aligned4_uint8_t *buf, uint32_t buf_len, otp
             // base of S permissions so that we don't try to do something we aren't able to
             // (in practice NS and NSBOOT oughtn't be more permissive than S, but it's possible)
             uint page = row >> NUM_OTP_PAGE_ROWS_LOG2;
+            static_assert(OTP_DATA_PAGE0_LOCK0_ROW == 62 << NUM_OTP_PAGE_ROWS_LOG2, "");
+            static_assert(OTP_DATA_PAGE1_LOCK0_ROW - OTP_DATA_PAGE0_LOCK0_ROW == 2, "");
+            if (page >= 62) page = (row << (32 - NUM_OTP_PAGE_ROWS_LOG2 - 1)) >> (32 - NUM_OTP_PAGE_ROWS_LOG2);
             uint32_t lockreg = otp_hw->sw_lock[page];
             uint page_locks = (lockreg & OTP_SW_LOCK0_SEC_BITS) >> OTP_SW_LOCK0_SEC_LSB;
-            uint page2 = __get_opaque_value(row) >> NUM_OTP_PAGE_ROWS_LOG2;
+            uint row2 = __get_opaque_value(row);
+            uint page2 = row2 >> NUM_OTP_PAGE_ROWS_LOG2;
+            if (page2 >= 62) page2 = (row2 << (32 - NUM_OTP_PAGE_ROWS_LOG2 - 1)) >> (32 - NUM_OTP_PAGE_ROWS_LOG2);
+            hx_assert_equal2i(page, page2);
             uint32_t lockreg2 = otp_hw->sw_lock[page2];
             uint page_locks2 = (lockreg2 & OTP_SW_LOCK0_SEC_BITS) >> OTP_SW_LOCK0_SEC_LSB;
 
@@ -419,6 +428,7 @@ uint32_t s_varm_step_safe_otp_read_rbit3_guarded(uint row) {
 uint32_t __attribute__((naked)) s_varm_step_safe_otp_read_rbit3_guarded(__unused uint row) {
     // we also don't handle wrap around the end of the OTP like the C version, but that isn't really correct either
     pico_default_asm(
+            "push {r1, r2, r3, lr}\n"
             ".cpu cortex-m33\n"
             // Note use of delay variant is deliberate, as this is early-boot only
             "mrc p7, #0, ip, c%c[tag_h], c%c[tag_l], #1\n" // canary_entry
@@ -429,6 +439,17 @@ uint32_t __attribute__((naked)) s_varm_step_safe_otp_read_rbit3_guarded(__unused
             "ldr r3, =otp_data_raw_guarded\n"
             "adds r3, r0\n"
             "ldmia r3!, {r0-r2}\n"
+            // Delay loop following obvious power signature of OTP reads
+            "negs r3, r3\n"                 // (early-out delay loop on RISC-V)
+            ".cpu cortex-m33\n"
+            "mrc2 p7, #2, r3, c0, c0, #0\n" // rcp_random_byte (or no-op on RISC-V)
+            ".cpu cortex-m23\n"
+            "asrs r3, #6\n"
+        "1:\n"
+            "subs r3, #1\n"
+            "bpl 1b\n"                     // 3 cycles/loop
+            "adds r3, #1\n"                // r3 should be -1; ensure death otherwise
+            "add ip, r3\n"
             // (a & b) | (a & c) | (b & c)
             // (a & (b | c)) | (b & c)
             "movs r3, r1\n" // b' = b
@@ -439,7 +460,7 @@ uint32_t __attribute__((naked)) s_varm_step_safe_otp_read_rbit3_guarded(__unused
             ".cpu cortex-m33\n"
             "mcr p7, #0, ip, c%c[tag_h], c%c[tag_l], #1\n" // canary_check
             ".cpu cortex-m23\n"
-            "bx lr\n"
+            "pop {r1, r2, r3, pc}\n"
             :
             : [otp_row_bits] "i" (NUM_OTP_ROWS_LOG2),
               [tag_h]     "i" (CTAG_S_VARM_STEP_SAFE_OTP_READ_RBIT3_GUARDED >> 4),

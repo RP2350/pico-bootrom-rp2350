@@ -17,8 +17,6 @@ set(ARM_IMPORTS
         # Set a prefix so we never accidentally use an arm symbol
         __armexport_
 
-        native_memcpy
-        native_memset
         s_from_nsboot_varm_service_call_no_boot_once_check/d
         s_native_api_validate_ns_buffer
         s_varm_api_chain_image
@@ -42,11 +40,9 @@ set(ARM_IMPORTS
         s_varm_api_otp_access
         s_varm_api_pick_ab_partition
         s_varm_api_reboot
-        s_varm_api_set_ns_api_permission
+        s_arm8_api_set_ns_api_permission
         s_varm_api_set_rom_callback
         s_varm_crit_core0_boot_path_entry_p2
-        s_varm_flash_abort
-        s_varm_flash_abort_clear
         s_varm_flash_page_program
         s_varm_flash_sector_erase
         s_varm_riscv_hx_get_boot_flag_impl/d # we don't want thumb bit as we set PC directly
@@ -158,6 +154,7 @@ target_compile_definitions(bootrom_raw PRIVATE
         # since you can't load and fetch from the bootrom on the same cycle:
         VARMULET_USE_EARLY_INSTR_READ=0
         VARMULET_USE_ENTER_HOOK_TO_OVERRIDE_REGISTER_STORED_HOOKS=1
+        VARMULET_NULL_IS_READ_ONLY=1
         SWAP_RISCV_NSBOOT_STACKS=1
         )
 if (NOT USE_64K_BOOTROM)

@@ -93,11 +93,11 @@ typedef struct {
 #define PICOBIN_PARTITION_LOCATION_SECTOR_BIT_MASK           0x1fffu
 
 #ifndef __ARM_ARCH_8M_MAIN__
-#define branch_under_varmulet(label) ({ rcp_asm("mrc p7, #1, r15, c0, c0, #0\n"); asm goto ("bvs %l[" __XSTRING(label) "]\n" : : : : label); })
-#define branch_under_non_varmulet(label) ({ rcp_asm("mrc p7, #1, r15, c0, c0, #0\n"); asm goto ("bvc %l[" __XSTRING(label) "]\n" : : : : label); })
+#define branch_under_varmulet(label) ({ rcp_asm("mrc2 p7, #1, r15, c0, c0, #0\n"); asm goto ("bvs %l[" __XSTRING(label) "]\n" : : : : label); })
+#define branch_under_non_varmulet(label) ({ rcp_asm("mrc2 p7, #1, r15, c0, c0, #0\n"); asm goto ("bvc %l[" __XSTRING(label) "]\n" : : : : label); })
 #define branch_under_varmulet_far(label) ({ asm goto ( \
     ".cpu cortex-m33\n"\
-    "mrc p7, #1, r15, c0, c0, #0\n"\
+    "mrc2 p7, #1, r15, c0, c0, #0\n"\
     "bvc 1f\n"\
     "b %l[" __XSTRING(label) "]\n"\
     ".cpu cortex-m23\n"\

@@ -19,44 +19,13 @@
 // implementation due to shared permission/return code. So, push them to
 // whichever section to satisfy code layout constraints.
 #define __sg_impl_exempt
-#define __sg_impl_nsc __attribute__((noinline, section(".secure_gateways")))
 
-int __sg_impl_nsc s_from_ns_arm8_api_checked_flash_op(cflash_flags_t flags, uintptr_t addr, uint32_t size_bytes, uint8_t *buf) {
-    int rc;
-    canary_entry(S_FROM_NS_ARM8_API_CHECKED_FLASH_OP);
-    hx_bool buffer_ok = hx_bool_invalid();
-    // Call from NonSecure: effective security level of the flash access must also be NS. This is
-    // checked against the permissions in the resident partition table.
-    uint seclevel = (flags.flags & CFLASH_SECLEVEL_BITS) >> CFLASH_SECLEVEL_LSB;
-    uint op = (flags.flags & CFLASH_OP_BITS) >> CFLASH_OP_LSB;
-    if (seclevel != CFLASH_SECLEVEL_VALUE_NONSECURE) {
-        rc = BOOTROM_ERROR_INVALID_ARG;
-        goto checked_flash_op_done;
-    }
-    if ((op == CFLASH_OP_VALUE_ERASE) != (buf == NULL)) {
-        rc = BOOTROM_ERROR_INVALID_ARG;
-        goto checked_flash_op_done;
-    }
-    // NS flash operations with RAM buffers must point to NS-accessible RAM
-    hx_bool write = make_hx_bool(op != CFLASH_OP_VALUE_READ);
-    if (buf != NULL) {
-        buf = s_native_api_validate_ns_buffer(buf, size_bytes, write, &buffer_ok);
-        if (hx_is_false(buffer_ok)) {
-            rc = (int)buf; // will be BOOTROM_ERROR_INVALID_ADDRESS;
-            goto checked_flash_op_done;
-        }
-    }
-    hx_assert_true(buffer_ok);
-    rc = s_varm_api_checked_flash_op(flags, addr, size_bytes, buf);
-    checked_flash_op_done:
-    canary_exit_return(S_FROM_NS_ARM8_API_CHECKED_FLASH_OP, rc);
-}
-
-int __sg_impl_nsc s_from_ns_arm8_api_flash_runtime_to_storage_addr(uintptr_t addr) {
+#if !ASM_SIZE_HACKS
+int __attribute__((noinline, section(".secure_gateways.second"))) s_from_ns_arm8_api_flash_runtime_to_storage_addr(uintptr_t addr) {
     canary_entry(S_FROM_NS_ARM8_API_FLASH_RUNTIME_TO_STORAGE_ADDR);
     // Only allow SAU-NonSecure addresses to be translated via this gateway
-    hx_bool addr_ok = hx_bool_invalid();
-    addr = (uintptr_t)s_native_api_validate_ns_buffer((const void *) addr, 1, hx_false(), &addr_ok);
+    hx_bool addr_ok;
+    addr = (uintptr_t)call_s_native_validate_ns_buffer((const void *) addr, 1, hx_false(), addr_ok);
     if (hx_is_false(addr_ok)) {
         // already the case
         // addr = (uintptr_t)BOOTROM_ERROR_INVALID_ADDRESS;
@@ -64,9 +33,36 @@ int __sg_impl_nsc s_from_ns_arm8_api_flash_runtime_to_storage_addr(uintptr_t add
     }
     hx_assert_true(addr_ok);
     addr = s_varm_api_flash_runtime_to_storage_addr(addr);
-    if ((int32_t)addr < 0) {
-        addr = (uintptr_t)BOOTROM_ERROR_INVALID_ADDRESS;
-    }
     runtime_to_storage_addr_done:
     canary_exit_return(S_FROM_NS_ARM8_API_FLASH_RUNTIME_TO_STORAGE_ADDR, (int)addr);
 }
+#else
+int __attribute__((naked)) __attribute__((noinline, section(".secure_gateways.second"))) s_from_ns_arm8_api_flash_runtime_to_storage_addr(__unused uintptr_t addr) {
+    // slightly painful, but need to inline because GCC insists on using expensive 4 byte variant of pop {pc}
+    pico_default_asm_volatile(
+         // rcp_canary_get_nodelay r1, S_FROM_NS_ARM8_API_FLASH_RUNTIME_TO_STORAGE_ADDR
+         "mrc2 p7, #0, r1, c%c[canary_hi], c%c[canary_lo], #1\n"
+        "push {r1, r2, r3, lr}\n"
+        "movs r1, #1\n"
+        "mov.w r2, %[bit_pattern_false]\n"
+        "bl s_native_validate_ns_buffer_internal\n"
+        // r1 is addr_valid hx_bool; if hx_false() r0 already has error code, otherwise r0 is still addr
+        "cmp r1, #0\n"
+        "bge 1f\n"
+        // rcp_btrue r1
+        "mcr p7, #2, r1, c0, c0, #0\n"
+        "bl s_varm_api_flash_runtime_to_storage_addr\n"
+        "1:\n"
+        "pop {r1}\n" // canary value
+         // rcp_canary_check_nodelay r1, S_FROM_NS_ARM8_API_FLASH_RUNTIME_TO_STORAGE_ADDR
+        "mcr2 p7, #0, r1, c%c[canary_hi], c%c[canary_lo], #1\n"
+        // overwrite canary value in r1 with input r2
+        "pop {r1, r3, pc}\n"
+        :
+        : [canary_hi] "i" (((CTAG_S_FROM_NS_ARM8_API_FLASH_RUNTIME_TO_STORAGE_ADDR) >> 4) & 0xf),
+          [canary_lo] "i" ((CTAG_S_FROM_NS_ARM8_API_FLASH_RUNTIME_TO_STORAGE_ADDR) & 0xf),
+          [bit_pattern_false] "i" (HX_BIT_PATTERN_FALSE)
+        :"cc", "memory"
+    );
+}
+#endif

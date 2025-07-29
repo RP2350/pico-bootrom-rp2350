@@ -18,13 +18,12 @@ SECTIONS {
 
         *(.text.varm_to_s_native_crit_launch_nsboot)
         KEEP(*(.text.s_native_crit_launch_nsboot))
-        KEEP(*(.text.varm_to_s_native_crit_init_default_xip_setup_and_enter_image_thunk))
         KEEP(*(.text.s_native_crit_init_default_xip_setup_and_enter_image_thunk))
-        *(.text.varm_to_s_native_api_validate_ns_buffer)
-        KEEP(*(.text.s_native_api_validate_ns_buffer))
+        *(.text.varm_to_s_native_validate_ns_buffer_internal)
+        KEEP(*(.text.s_native_validate_ns_buffer_internal))
         *(.text.s_varm_api_flash_enter_cmd_xip) /* falls thru */
         *(.text.s_varm_api_crit_flash_select_xip_read_mode) /* falls thru */
-        *(.text.s_varm_crit_redo_last_reboot) /* needs to be near s_varm_api_reboot */
+        *(.text.s_varm_crit_redo_last_reboot_trash_r4_r5) /* needs to be near s_varm_api_reboot */
         KEEP(*(.text.s_from_nsboot_varm_reboot)) /* needs to be near s_varm_api_reboot */
         KEEP(*(.text.s_varm_api_reboot)) /* falls thru */
         *(.text.s_varm_hx_reboot)
@@ -34,15 +33,21 @@ SECTIONS {
         KEEP(*(.text.s_varm_api_checked_flash_op))
         *(.text.s_varm_api_hx_otp_access)
         *(.text.s_varm_api_otp_access) /* does b.n to previous func */
+        *(.text.s_varm_flash_abort) /* falls thru */
+        *(.text.s_varm_flash_abort_clear) /* falls thru */
+        KEEP(*(.text.s_varm_flash_abort_common))
 
         /* Mark APIs as KEEP because they may only be referred to by the ROM
            table, and those references are not visible to the Arm link step
            (since it's linked in the RISC-V binary using Arm post-link
            exports). Note __attribute__((used)) is only for the compiler. */
-        KEEP(*(.text.s_varm_api_* .text.s_arm8_api_*))
+        KEEP(*(.text.s_varm_api_* .text.s_arm8_api_* .text.s_native_api_*))
 
         /* Main Secure/Exempt text entries */
         *(SORT_BY_ALIGNMENT(.text.s_*))
+
+        /* these are after s_ as we don't want them to fall thru into secure code */
+        *(.textend.s_*)
 
         /* ideally these should be inline (and they do now seem to be, so commented out): */
         /**(SORT_BY_ALIGNMENT(.text.rcp_*))*/
@@ -77,6 +82,7 @@ SECTIONS {
            need to align the start. */
         . = ALIGN(32);
         sonly_text_end = .;
+        sonly_text_end_plus_7 = sonly_text_end + 7;
 
         ns_start = .;
         ns_text_start = .;
@@ -95,7 +101,7 @@ SECTIONS {
         unknown_text_end = .;
 
         PROVIDE(__start_of_secure_xn = .);
-        KEEP(*(.rodata.keep*))
+        KEEP(*(SORT_BY_ALIGNMENT(.rodata.keep*)));
         *(.rodata*)
         this_is_the_end_my_only_friend_the_end = .;
         . = ${BOOTROM_ARM_SIZE}; /* ALIGN(LENGTH(ROM)); note hack to BOOTRAM_ARM_SIZE to allow RAM builds */
@@ -111,21 +117,34 @@ SECTIONS {
 
     ASSERT(s_native_crit_flash_put_get == varm_to_s_native_crit_flash_put_get + 2, "varm_to_s_native failure 1")
     ASSERT(s_native_crit_launch_nsboot == varm_to_s_native_crit_launch_nsboot + 4, "varm_to_s_native failure 2")
-    ASSERT(s_native_api_validate_ns_buffer == varm_to_s_native_api_validate_ns_buffer + 4, "varm_to_s_native failure 3")
-    ASSERT(s_native_crit_init_default_xip_setup_and_enter_image_thunk == varm_to_s_native_crit_init_default_xip_setup_and_enter_image_thunk + 4, "varm_to_s_native failure 4")
+    ASSERT(s_native_validate_ns_buffer_internal == varm_to_s_native_validate_ns_buffer_internal + 2, "varm_to_s_native failure 3")
+    ASSERT(s_native_crit_init_default_xip_setup_and_enter_image_thunk == varm_to_s_native_crit_init_default_xip_setup_and_enter_image_thunk + 2, "varm_to_s_native failure 4")
     ASSERT(s_varm_api_crit_flash_select_xip_read_mode == s_varm_api_flash_enter_cmd_xip + 4, "fall thru failure 1")
     ASSERT(s_varm_hx_reboot == s_varm_api_reboot_end, "fall thru failure 2")
     ASSERT(varm_to_s_native_crit_flash_put_get == s_varm_flash_put_get_nodata + 2, "fall thru failure 4")
     ASSERT(s_varm_api_checked_flash_op == s_from_nsboot_varm_flash_sector_erase_end, "fall thru failure 5")
+    ASSERT(s_varm_flash_abort_clear == s_varm_flash_abort_end, "fall thru failure 6")
+    ASSERT(s_varm_flash_abort_common == s_varm_flash_abort_clear_end, "fall thru failure 7")
+    /* todo why is this failing? they ARE equal */
+    /* ASSERT(s_from_ns_varm_api_otp_access_internal == s_from_ns_varm_api_otp_access_end, "fall thru failure 8") */
     ASSERT(sonly_varm_make_hx_bool_impl != sonly_varm_make_hx_bool_impl + 16, "prolog overlap error")
     ASSERT(boot_path_rnd_to_sha_end == boot_path_rnd_to_sha_start + 12, "boot path rnd to sha size != 12")
 
+    ASSERT(sonly_text_end_plus_7 & 7 == 7, "misalign of sonly_text_end_p7")
+
+    ASSERT(cpacr == 0x34, "cpacr pointer in wrong place")
     .secure_gateways : {
         ASSERT((. & 31) == 0, "ERRROR secure_gateways not 32 byte aligned");
         PROVIDE(__start_of_secure_gateways = .);
         KEEP(*(.secure_gateways.first))
+        KEEP(*(.secure_gateways.second))
         *(.secure_gateways .secure_gateways.*)
         KEEP(*(.sg_fillers))
+        __sg_bootpath_needed_start = .;
+        /* we round up here, even though we want the rounded down value, so we don't insert
+           a symbol mid-instruction which breaks the DIS and then our post build checks */
+        __sg_bootpath_needed_start_roundup_32 = ((__sg_bootpath_needed_start + 32) & ~31);
+        KEEP(*(.sg_bootpath_needed))
         . = ORIGIN(ROMSG) + LENGTH(ROMSG);
         PROVIDE(__end_of_secure_gateways = .);
     } >ROMSG =0x0000
@@ -145,13 +164,15 @@ SECTIONS {
         *(.allowed_bss*)
     } >BOOTRAM
 
-    _end_of_core1_boot_path_roundup_32_plus_1 = ((_end_of_core1_boot_path + 31) & ~31) + 1;
+    _end_of_core1_boot_path_roundup_32_plus_5 = ((_end_of_core1_boot_path + 31) & ~31) + 5;
 
     ASSERT(SIZEOF(.data) == 0,
         "ERROR: do not use static memory in bootrom! (.data)")
     ASSERT(SIZEOF(.bss) == 0,
         "ERROR: do not use BSS memory in bootrom! (.bss)")
     ASSERT(SIZEOF(.allowed_bss) == ${BOOTRAM_ARM_STATIC_DATA_SIZE}, "allowed_bss size mismatch")
+
+    sau_rlar = ${BOOTROM_SG_END} - 32 + 1/*M33_SAU_RLAR_ENABLE_BITS*/;
 
     INCLUDE "${P16_ASSERTS_LINKER_SCRIPT}"
 

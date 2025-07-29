@@ -61,7 +61,7 @@ _magic:
 _major_version:
 .byte 2
 _minor_version:
-.byte 2
+.byte 3
 
 _arm_well_known_rom_table_base:
 .hword BOOTROM_ROMTABLE_START
@@ -72,6 +72,15 @@ _arm_well_known_func_table_lookup_entry:
 
 copyright:
 .string "(C) 2024 Raspberry Pi Ltd"
+
+.global cpacr
+cpacr:
+.word PPB_BASE + M33_CPACR_OFFSET
+
+#define TT_VALUE_OFFSET 0x38
+.global tt_value
+tt_value:
+.word 0x2c70703
 
 // Args: 2-char symbol in r0, flag query in r1.
 // Each table entry is a 2-char symbol, an hword of flags, and then 1 hword of
@@ -178,26 +187,42 @@ arm8_table_lookup_val:
 .type s_arm8_entry_point,%function
 .thumb_func
 s_arm8_entry_point:
+
+    ldr r7, =SIO_BASE
+    ldr r7, [r7, #SIO_CPUID_OFFSET] // r7 = core_num
+
     // Note on constants: we have
     //   ed08 VTOR
     //   ed94 MPU_CTRL
     //   ed88 CPACR
     //   edd0 SAU_CTRL
     // So to avoid near-misses in the literal pool, we always start by
-    // materialising VTOR and then add an 8-bit offset if necessary.
+    // materialising CPACR and then do arithmetic on that
 
     // enable canary processor
     // CPACR = M33_CPACR_CP7_BITS
-    ldr r0, =PPB_BASE + M33_VTOR_OFFSET
-    adds r0, #M33_CPACR_OFFSET - M33_VTOR_OFFSET
+    movs r2, #0 // done here not below for alignment
+
+    .p2align 2 // this is the case
+    // lets delay one core a cycle (requires alignment so nop is free on fall thru)
+    // since you'd have to glitch both during the SAU checks below)
+    cbz r7, 1f
+    nop
+1:
+    ldr r0, [r2, #CPACR_OFFSET]
     movs r1, #M33_CPACR_CP7_BITS
     str r1, [r0]
+
+    // we could do this here to trap if we didn't enable the RCP, but that is no better
+    // really than trapping later - we still don't do a real RCP panic.
+    // mrc p7, #1, r3, c0, c0, #0
+
     // good a place as any to enable it for NS too
-    movs r2, #M33_NSACR_CP7_BITS
-    str r2, [r0, #M33_NSACR_OFFSET - M33_CPACR_OFFSET]
+    movs r3, #M33_NSACR_CP7_BITS
+    str r3, [r0, #M33_NSACR_OFFSET - M33_CPACR_OFFSET]
     // NSACR = M33_NSACR_CP7_BITS
-    add r0, #PPB_NONSEC_BASE - PPB_BASE
-    str r1, [r0]
+    add r3, r0, #PPB_NONSEC_BASE - PPB_BASE
+    str r1, [r3]
     // NS.CPACR = M33_CPACR_CP7_BITS
 
 enable_sau:
@@ -230,21 +255,90 @@ enable_sau:
     //   want all of it to all be Secure-executable, since this would mean a
     //   larger ROP surface.
 
-    ldr r0, =PPB_BASE + M33_VTOR_OFFSET
-    adds r0, #M33_SAU_CTRL_OFFSET - M33_VTOR_OFFSET
+    // r0 = PPB_CPACR
+    adds r0, #M33_SAU_CTRL_OFFSET - M33_CPACR_OFFSET
+    // r0 = PPB_SAU_CTRL
+
     // we will do an stmia to set all 5 registers (not we write garbage to SAU_TYPE which is read-only)
 #if M33_SAU_TYPE_OFFSET-M33_SAU_CTRL_OFFSET != 4 || M33_SAU_RNR_OFFSET-M33_SAU_CTRL_OFFSET != 8 || \
     M33_SAU_RBAR_OFFSET-M33_SAU_CTRL_OFFSET != 12 || M33_SAU_RLAR_OFFSET-M33_SAU_CTRL_OFFSET != 16
 #error expected 5 registers in order
 #endif
     movs r1, #M33_SAU_CTRL_ENABLE_BITS; // ALLNS=0 ENABLE=1
-    movs r3, #7
-    ldr  r4, =P16(sonly_text_end)
+    movs r3, #7 // RNR
+    // note we can't add 7 in the constant as it is a P16_ index
+    movw r4, #P16(sonly_text_end_plus_7) // RBAR we have 0b111 or-ed into this, since those bits are RES0 and won't be read back below
     // note `+` because this is a linker relocation:
+#if BOOTROM_SG_END & 31
+#error SG_END should be 32 byte aligned
+#endif
     ldr  r5, =BOOTROM_SG_END - 32 + M33_SAU_RLAR_ENABLE_BITS
-    stmia r0!, {r1-r5}
+    stmia r0, {r1-r5}
+
+    // r3 is loop counter (which is 7 - the region number)... if that was not initialized,
+    // then we may loop forever, but also the region won't have been set correctly
+
+    // Note: the first beq is false due to movs above clearing the Z flag.
+
+    // note r2 should still be 0
+check_sau_loop:
+    movw r10, P16(sonly_text_end)
+    ldr r4, [r0, #12]
+    cmp r4, r10
+    beq 1f
+0:
+    rcp_panic
+1:
+    // we can only test in the SG region; everything else in the bootrom returns 004c0000
+
+    // note tt must be at least 1 cycle away from the stmia above as we have no explicit barrier for space
+
+    // removed this code, as if r5 is not set correctly; it should
+    // be impossible to get the correct value
+    tt r2, r5
+    mov r4, r2
+    lsrs r2, r2, #16 // if we skip the tt multiple times (or skipped first tt), r2 will be zero
+
+    // removed to save space
+//    // note double check of Z flag
+//    cmp r2, #0
+//    bne 1f
+//    rcp_panic
+//1:
+    beq 0b
+
+    ldr r6, initial_sau_value
+    cmp r4, r6
+    beq 1f // opposite test to above
+    rcp_panic
+1:
+    // Test bit 25: should be set (expected value: 0x02ce0700)
+    lsls r6, r4, #6
+    bmi 1f
+    rcp_panic
+1:
+    ldr r6, initial_sau_value
+    subs r6, r4
+    beq 1f
+    rcp_panic
+1:
+    adds r3, r6
+    lsls r4, #6
+    // removed to save space
+//    bmi 1f
+//    rcp_panic
+//1:
+    bpl 0b
+    subs r3, #1
+    cmp r3, #0
+    bne check_sau_loop
+    cmp r3, #0
+    beq 1f
+    rcp_panic
+1:
 
 #if HACK_RAM_BOOTROM_AT
+    // todo this is likely now bit-rotted
     ldr r0, =PPB_BASE + M33_VTOR_OFFSET
     adds r0, #M33_SAU_CTRL_OFFSET - M33_VTOR_OFFSET
     // Second region is required to get SGs to be NSC, as there are no IDAU
@@ -258,43 +352,137 @@ enable_sau:
     str  r2, [r0, #M33_SAU_RLAR_OFFSET-M33_SAU_CTRL_OFFSET]
 #endif
 
+#if (M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS) != 5
+#error
+#endif
+
+enable_mpu:
+    subs r0, #M33_SAU_CTRL_OFFSET - M33_MPU_CTRL_OFFSET
+    //
+    adr r6, bootrom_mpu_regs
+    ldmia r6, {r1, r2, r3, r4, r5, r8, r9, r10, r11, ip}
+    stmia r0, {r1, r2, r3, r4, r5, r8, r9, r10, r11, ip}
+check_mpu:
+    // note r5 is a large number from above if this is skipped
+    movs r5, #5 // note 5 is also the enable value
+    mov ip, r5
+check_mpu_loop1:
+    adr r6, bootrom_mpu_regs + 8
+    movs r3, #0xf0 // we start with something that won't neatly count up to BOOTROM_MPU_REGION_COUNT
+check_mpu_loop2:
+    ldmia r6!, {r1, r4}
+    // r1 = expected rbar
+    // r4 = expected rlar
+    str r3, [r0, #4] // region number possibly with extra bits, read back below unmasked
+    ldmia r0, {r2, r3, r10, r11}
+    // r2 = ctrl
+    // r3 = rnr
+    // r10 = rbar
+    // r11 = rlar
+    cmp r2, ip // MPU enable
+    beq 1f
+    rcp_panic
+1:
+    cmp r0, #0
+    cmp r1, r10 // RBAR correct
+    beq 1f
+    rcp_panic
+1:
+    subs r4, #0x10 // correct for the bit we set which is RES0 in the RLAR
+    cmp r4, r11 // RLAR correct
+    beq 1f
+    rcp_panic
+1:
+    adds r3, #1
+    cmp r3, #BOOTROM_MPU_REGION_COUNT
+    bne check_mpu_loop2 // do another check
+    beq 1f
+    rcp_panic
+1:
+    adds r5, r3
+    subs r5, #BOOTROM_MPU_REGION_COUNT + 1
+    bne check_mpu_loop1
+    cmp r5, #0
+    beq 1f
+    rcp_panic
+1:
+
+    // r5 should be zero
+    ldr r3, [r5, #TT_VALUE_OFFSET]
+    tt r4, r4
+    movs r2, #1
+    cmp r4, r3
+    beq 1f
+    rcp_panic
+1:
+    movs r2, #1
+    cmp r4, r3
+    beq 1f
+    rcp_panic
+1:
+
     // Check if this is core 0, and go to holding pen if not enter main booth path
 check_core:
     // NOTE: We DO NOT use any stack prior to possible watchdog entry
-    ldr r0, =SIO_BASE
-    ldr r1, [r0, #SIO_CPUID_OFFSET]
-    cbnz r1, core1_boot_path
+    cbnz r7, core1_boot_path
 
 set_secure_stack:
-    ldr r1, =BOOTRAM_PREBOOT_STACK_TOP
-    sub r0, r1, #BOOTRAM_PREBOOT_STACK_SIZE
+    // r3 is currently invalid (mostz likely 0x2c70703)
+    ldr r3, =BOOTRAM_PREBOOT_STACK_TOP
+    subs r0, r3, #BOOTRAM_PREBOOT_STACK_SIZE
     msr msplim, r0
 #if !(BOOTRAM_PREBOOT_STACK_TOP & 4)
 #error expect un-aligned stack top for now to keep stack alignment once we enter C code
 #endif
 
-zero_most_of_bootram:
+zero_secure_stack:
     // zero bootram up to preboot stack top (i.e. everything except core1 and always)
-    movs r2, #0
+    // note r5 should be 0, but could be 0x01 0x02 0x3 or 0x04 0x05 if the check_mpu_loop1 check is skipped above
 1:
-    stmia r0!, {r2}
-    cmp r0, r1
+    stmia r0!, {r5}
+    cmp r0, r3
     bne 1b
-    mov sp, r1
+    // since we set sp to r0, there is a good chance that the stack was cleared, or that
+    // we will subsequently overflow the stack.
+    mov sp, r0
 
     // continue in C code (note the weird call is because we skip the callee-saving which wastes
     // our limited stack space for a function that will never return
     b s_varm_crit_core0_boot_path_entry_p2 - 2
 
-.global native_wait_rescue, varm_wait_rescue
-.type native_wait_rescue,%function
-.type varm_wait_rescue,%function
-.thumb_func
-native_wait_rescue:
-varm_wait_rescue:
-    cpsid i // disable IRQs
-    wfi
-    b.n varm_wait_rescue
+#define MPU_REGION_RO_XN(n, rbar, rlar) \
+   .word rbar + M33_MPU_RBAR_XN_BITS + (2 << M33_MPU_RBAR_AP_LSB), \
+    (rlar) + M33_MPU_RLAR_EN_BITS + 0x10 // note 0x10 will be written but not read back
+.p2align 2
+bootrom_mpu_regs:
+    /* ctrl */ .word M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS
+initial_sau_value:
+    /* rnr */  .word 0x02ce0700 // note RNR is only 3 bits, so this value is 0 for that purpose (we save 4 bytes by putting constant here)
+#if BOOTROM_MPU_REGION_BOOTRAM_CORE1 != 0 || \
+    BOOTROM_MPU_REGION_RAM != 1 || \
+    BOOTROM_MPU_REGION_FLASH != 2 || \
+    BOOTROM_MPU_REGION_SECURE_XN != 3
+#error mpu regions should be in order
+#endif
+    // note this range isn't exact due to alignment (we round inwards) but it is still between the core 0 stack and our always data
+    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_BOOTRAM_CORE1,
+                     (BOOTRAM_BASE + BOOTRAM_RUNTIME_CORE1_OFFSET + HACK_STACK_WORDS * 4 + 0x1fu) & ~0x1fu,
+                     (BOOTRAM_BASE + BOOTRAM_ALWAYS_OFFSET - 0x1fu) & ~0x1fu)
+    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_RAM,
+                     SRAM_BASE,
+                     SRAM_END - 0x20)
+    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_FLASH,
+                     XIP_BASE,
+                     SRAM_BASE - 0x20)
+    // note this must be at the end as we don't reset RNR before updating it for core1
+    // (we move the base to _end_of_core1_boot_path)
+    MPU_REGION_RO_XN(BOOTROM_MPU_REGION_SECURE_XN,
+                     __start_of_secure_xn,
+                     // note we make all of SG XN as well since we dont need it until NS BOOT
+                     // except for a little bit at the end. (note we want the round down, which is
+                     // the first -32, then -0x20 for inclusive)
+                     __sg_bootpath_needed_start_roundup_32 - 32 - 0x20)
+mpu_regions_end:
 
 // ----------------------------------------------------------------------------
 // Core 1 boot path
@@ -310,7 +498,7 @@ varm_wait_rescue:
 // is lifted at the point we commit to launching core 1 into user code.
 
 // takes r4 = SIOB_BASE
-// returns r0 = word received
+// returns r6 = word received
 .thumb_func
 receive_and_check_zero:
 #if FEATURE_CANARIES
@@ -318,13 +506,13 @@ receive_and_check_zero:
 #endif
 receive_and_check_zero_lp:
     wfe
-    ldr r0, [r4, #SIO_FIFO_ST_OFFSET]
-    lsrs r0, #SIO_FIFO_ST_VLD_LSB + 1
+    ldr r6, [r4, #SIO_FIFO_ST_OFFSET]
+    lsrs r6, #SIO_FIFO_ST_VLD_LSB + 1
     bcc receive_and_check_zero_lp
 
-    ldr r0, [r4, #SIO_FIFO_RD_OFFSET]
+    ldr r6, [r4, #SIO_FIFO_RD_OFFSET]
     // if we received 0, we reset back to main loop
-    cbz r0, core_0_handshake_loop
+    cbz r6, core_0_handshake_loop
 #if FEATURE_CANARIES
     rcp_canary_check_nodelay ip, CTAG_RECEIVE_AND_CHECK_ZERO
 #endif
@@ -335,7 +523,7 @@ send_and_then_again:
     // in case of multiple core 1 resets, we can keep pushing and fill the FIFO
     // we should wait for an event if the FIFO is full to avoid busy wait
     wfe
-// takes r0 = word to send, r4 = SIOB_BASE, r5 link register
+// takes r6 = word to send, r4 = SIOB_BASE, r5 link register
 send_and_then:
 #if FEATURE_CANARIES
     // note nodelay as we loop over it, and we could easily expose a lot of delay timings
@@ -344,7 +532,7 @@ send_and_then:
     ldr r1, [r4, #SIO_FIFO_ST_OFFSET]
     lsrs r1, #SIO_FIFO_ST_RDY_LSB + 1
     bcc send_and_then_again
-    str r0, [r4, #SIO_FIFO_WR_OFFSET]
+    str r6, [r4, #SIO_FIFO_WR_OFFSET]
     sev
 #if FEATURE_CANARIES
     rcp_canary_check_nodelay ip, CTAG_SEND_AND_THEN
@@ -359,29 +547,22 @@ send_and_then:
 wait_for_rcp_salt:
     wfe
 core1_boot_path:
-    // Keep SCB pointer in r7, MPU pointer in r6:
-    ldr r7, =(PPB_BASE + M33_VTOR_OFFSET)
-    adds r6, r7, #(M33_MPU_CTRL_OFFSET - M33_VTOR_OFFSET)
-#if M33_MPU_RNR_OFFSET != (M33_MPU_CTRL_OFFSET + 4) || M33_MPU_RBAR_OFFSET != (M33_MPU_CTRL_OFFSET + 8) || \
-    M33_MPU_RLAR_OFFSET != (M33_MPU_CTRL_OFFSET + 12)
-#error ??
+    // r0 = MPU_CTRL
+    // make more of bootrom RO XN
+    movw r2, #P16(_end_of_core1_boot_path_roundup_32_plus_5)
+    str r2, [r0, #M33_MPU_RBAR_OFFSET - M33_MPU_CTRL_OFFSET]
+
+#if !NO_EXTRA_SAU_MPU_CHECKS
+    // r5 should be 0 if the check loop of SAU completed
+    ldr r3, [r5, #TT_VALUE_OFFSET]
 #endif
-    // Set memory outside of core 1 boot path to execute-never, until we
-    // receive a valid vector. It is harmless to do this multiple times:
-    movs r0, #(M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS)
-    movs r1, #0
-#if M33_MPU_RBAR_XN_BITS != 1
-#error M33_MPU_RBAR_XN_BITS != 1
-#endif
-    ldr r2, =P16(_end_of_core1_boot_path_roundup_32_plus_1)
-    // -32 is end-of-memory, due to inclusive MPU bounds:
-    subs r3, r1, #(32 - M33_MPU_RLAR_EN_BITS)
-    stmia r6!, {r0-r3}
+    // Keep SCB pointer in r7
+    sub r7, r0, #(M33_MPU_CTRL_OFFSET - M33_VTOR_OFFSET)
+
     // The rcp.canarystatus instruction returns hx_true (0xa500a500) if the
     // salt has been loaded, and hx_false (0x00c300c3) if it has not:
     mrc p7, #1, APSR_nzcv, c0, c0, #0
     bpl wait_for_rcp_salt
-    subs r6, #16
     // Note RCP instructions after this point will fault if the RCP is not
     // initialised, so the branch above is just a friendly check.
 
@@ -398,12 +579,13 @@ wait_for_vector:
     ldr r1, [r4, #SIO_FIFO_RD_OFFSET]
 core_0_handshake_loop:
     rcp_count_set STEPTAG_ASM_C1_BOOTPATH + 0
-    // Sanity check MPU limit which should have been set earlier
-    ldr r2, [r6, #(M33_MPU_RLAR_OFFSET - M33_MPU_CTRL_OFFSET)]
-    // recreate the constant in case r3 (which already had the value from above
-    // is comprimized)
-    movs r3, #-(32 - M33_MPU_RLAR_EN_BITS)
+
+#if !NO_EXTRA_SAU_MPU_CHECKS
+    // note this is hopefully superfluous due to checks above so can be considered for removal if we need space
+    movw r1, #BOOTROM_SG_START
+    tt r2, r1
     rcp_iequal r2, r3
+#endif
 
     // drain the FIFO before sending 0
     ldr r1, [r4, #SIO_FIFO_ST_OFFSET]
@@ -413,21 +595,21 @@ core_0_handshake_loop:
     // ...and_then = receive_and_check_zero (which jmps to core_0_handshake_loop on 0)
     adr r5, receive_and_check_zero
     // send 0
-    movs r0, #0
+    movs r6, #0
     bl send_and_then
     rcp_count_check STEPTAG_ASM_C1_BOOTPATH + 0
     // check for cmd 1
-    cmp r0, #1
+    cmp r6, #1
     bne core_0_handshake_loop
     // ack and receive VTOR
     bl send_and_then
     rcp_count_check STEPTAG_ASM_C1_BOOTPATH + 1
-    str r0, [r7, #(M33_VTOR_OFFSET - M33_VTOR_OFFSET)]
+    str r6, [r7, #(M33_VTOR_OFFSET - M33_VTOR_OFFSET)]
     // ack and receive SP
     bl send_and_then
     rcp_count_check STEPTAG_ASM_C1_BOOTPATH + 2
     // initialize
-    mov sp, r0
+    mov sp, r6
     bl send_and_then
     rcp_count_check STEPTAG_ASM_C1_BOOTPATH + 3
     adr r5, core1_launch
@@ -438,14 +620,18 @@ core1_launch:
     // Disable SLEEPDEEP before exiting, as it affects wake latency
     movs r1, #0
     str r1, [r7, #(M33_SCR_OFFSET - M33_VTOR_OFFSET)]
-    // Disable MPU to remove XN region
-    str r1, [r6, #(M33_MPU_CTRL_OFFSET - M33_MPU_CTRL_OFFSET)]
-    // Also clear the RLAR (contains region enable) as it's a bit rude to leave the region behind
-    str r1, [r6, #(M33_MPU_RLAR_OFFSET - M33_MPU_CTRL_OFFSET)]
+    // Zero out MPU (can't use memset as MPU has XN on that part of bootrom)
+    movs r2, #2 + BOOTROM_MPU_REGION_COUNT * 2
+1:
+    stmia r0!, {r1}
+    subs r2, #1
+    bne 1b
+    bne 1b
+
     // Enter user-supplied vector
     rcp_count_check STEPTAG_ASM_C1_BOOTPATH + 4
     // hardening: done
-    blx r0
+    blx r6
 
 // Low power hang on return. Reset the core if you want to provide another entry point
 // (There is no need to return though)
@@ -468,6 +654,13 @@ _end_of_core1_boot_path:
 // returning to bootrom C code
 
 .section .text.s_native_crit_init_default_xip_setup_and_enter_image_thunk
+
+// inline version of VARM_TO_PREAMBLE which saves us 2 bytes as we're in the same section
+.global varm_to_s_native_crit_init_default_xip_setup_and_enter_image_thunk
+.thumb_func
+varm_to_s_native_crit_init_default_xip_setup_and_enter_image_thunk:
+varm_hint HINT_s_native_crit_init_default_xip_setup_and_enter_image_thunk
+
 .global s_native_crit_init_default_xip_setup_and_enter_image_thunk
 s_native_crit_init_default_xip_setup_and_enter_image_thunk:
     ldrd r9, r10, [sp, #0]
@@ -477,6 +670,11 @@ s_native_crit_init_default_xip_setup_and_enter_image_thunk:
     // r3 = sp
     // r9 = sp_lim
     // r10 = vector_table
+
+    // double check the entry-point again the image_def stored in the parsed_block_loop
+    ldr r5, [sp, #8] // parsed_block_loop
+    ldr r5, [r5, #PARSED_BLOCK_LOOP_IMAGE_DEF_ROLLED_ENTRY_POINT_ADDR_OFFSET]
+    rcp_iequal r2, r5
 
     // Note this wipes our stack, which is ok since we aren't returning. Don't
     // call memset, because it may save the callee saves on the stack and then
@@ -488,6 +686,7 @@ s_native_crit_init_default_xip_setup_and_enter_image_thunk:
     stmia r4!, {r6}
     cmp r4, r5
     blo 1b
+    rcp_iequal r4, r5
 
     // ---------------- DO NOT CALL ANY FUNCTIONS USING STACK BELOW THIS POINT  ----------------
     // We have just erased the stack, and are about to copy XIP setup into former stack space.
@@ -498,13 +697,13 @@ s_native_crit_init_default_xip_setup_and_enter_image_thunk:
 #if BOOTRAM_ALWAYS_OFFSET != BOOTRAM_SIZE - BOOTRAM_ALWAYS_SIZE
 #error
 #endif
-    ldr r7, [r5, #BOOTRAM_ALWAYS_SECURE_OFFSET - BOOTRAM_ALWAYS_OFFSET]
+    ldr r4, [r5, #BOOTRAM_ALWAYS_SECURE_OFFSET - BOOTRAM_ALWAYS_OFFSET]
     // need to set flags, and take the opportunity to XOR out the "secure" XOR
-    eors r7, #HX_XOR_SECURE
+    eors r4, #HX_XOR_SECURE
     // branch if secure (top bit set)
     bmi 1f
     // if we're skipping the clear, assert this is actually the secure "false" value
-    rcp_bfalse r7
+    rcp_bfalse r4
     b 2f
 1:
     ldr r4, =USBCTRL_DPRAM_BASE
@@ -514,14 +713,15 @@ s_native_crit_init_default_xip_setup_and_enter_image_thunk:
     stmia r4!, {r6}
     cmp r4, r5
     blo 1b
+    rcp_iequal r4, r5
 2:
 
-    ldr r6, =(PPB_BASE + M33_VTOR_OFFSET)
-    str r10, [r6]
+    ldr r4, =(PPB_BASE + M33_VTOR_OFFSET)
+    str r10, [r4]
 
     // Copy default xip setup code into boot ram -- this code just restores the XIP mode found by try_flash_boot.
     ldr r7, =BOOTRAM_BASE + BOOTRAM_XIP_SETUP_CODE_OFFSET
-    ldr r6, =P16(s_native_default_xip_setup)
+    movw r6, P16(s_native_default_xip_setup)
 #if DEFAULT_ARM_XIP_SETUP_SIZE_BYTES == 12
     ldmia r6, {r4-r6}
     stmia r7!, {r4-r6}
@@ -546,10 +746,18 @@ s_native_crit_init_default_xip_setup_and_enter_image_thunk:
 #endif
     blx r2 // we don't expect the binary to return, but safe for us to hang (slightly better than no link register)
 
-// Die without taking out the opposite core:
+.global native_wait_rescue, varm_wait_rescue
 .global varm_dead_quiet
+.type native_wait_rescue,%function
+.type varm_wait_rescue,%function
+.type varm_dead_quiet,%function
 .thumb_func
+native_wait_rescue:
+varm_wait_rescue:
 varm_dead_quiet:
+    cpsid i // disable IRQs
+    // fall thru
+// Die without taking out the opposite core:
 1:
     wfi
     b 1b
@@ -570,77 +778,87 @@ varm_dead:
 #endif
 
 // This entry point is called from the secure gateway under ARM
-.global s_from_ns_nsboot_service_call
+// on Entry r0, r1, r2 args are stacked (along with a dummy reg and lr)
+// r0 == ip, r1==ip
+.global s_from_nsboot_service_call
 .thumb_func
-s_from_ns_nsboot_service_call:
+s_from_nsboot_service_call:
 #if FEATURE_CANARIES
     rcp_count_set_nodelay STEPTAG_S_FROM_NS_NSBOOT_SERVICE_CALL
 #endif
+    rcp_canary_check_nodelay r2, CTAG_SG_CALL
     // under ARM we need to make sure we have not taken a boot path other than NSBOOT (at which point this API is not allowed)
-    push {r0, r1}
-    ldr r0, =BOOTRAM_BASE
-    ldr r0, [r0, #BOOTRAM_WRITE_ONCE0_OFFSET]
-    movs r1, #0
+    ldr r2, =BOOTRAM_BASE + BOOTRAM_WRITE_ONCE0_OFFSET
+    ldr r1, [r2]
+    ldr r0, =BOOTRAM_BASE + BOOTRAM_WRITE_ONCE0_OFFSET
+    eors r2, r0 // r2 should be zero
+    ldr r0, [r0]
+    cmp r3, #SC_max_secure_call_num + 1
+    adcs r0, r2
+    rcp_iequal r0, r1 // two reads are the same (and we didn't exceed max number)
+    orrs r0, r1
 #if BOOT_ONCE_NSBOOT_API_DISABLED == 0
     lsls r0, #31 // 16-bit encoding
 #else
     ands r0, r0, #(1u << BOOT_ONCE_NSBOOT_API_DISABLED)
 #endif
-    rcp_iequal r0, r1 // boot_once_disabled bit == false
-    asrs r0, r3, #31
-    rcp_iequal r0, r1 // call_number >= 0
-    rsbs r0, r3, #SC_max_secure_call_num
-    asrs r0, r0, #31
-    rcp_iequal r0, r1 // call_number <= SC_max_secure_call_num
-    pop {r0, r1}
+1:
+    rcp_iequal r0, r2 // boot_once_disabled bit == false
+    ldr r2, =BOOTRAM_BASE + BOOTRAM_NSBOOT_SECURE_STACK_OFFSET
+    ldr r2, [r2, r0]
+    rcp_bfalse r2
+    rcp_bfalse r2
+    pop {r0, r1, r2}
 
 // RISC-V code enters here under varmulet; we use .cpu to make sure everything other than RCP instructions are v8-M baseline
 .cpu cortex-m23
 .global s_from_nsboot_varm_service_call_no_boot_once_check
 .thumb_func
 s_from_nsboot_varm_service_call_no_boot_once_check:
-#if BOOTROM_32BIT_FUNC_POINTERS
-    lsls r3, #2
-#else
-    lsls r3, #1
-#endif
-    cmp r3, #varm_from_nsboot_func_table_end - varm_from_nsboot_func_table
-    mov ip, r3
-    bhs.n varm_dead // note we checked this before in the ARM case
-    // we don't need to preserve r3, but we maintain stack alignment, and provide a place for our canary
+    push {r2, r3, lr}
 #if FEATURE_CANARIES
 .cpu cortex-m33
-    rcp_canary_get_nodelay r3, CTAG_S_FROM_NS_NSBOOT_SERVICE_CALL
+    rcp_canary_get_nodelay r2, CTAG_S_FROM_NS_NSBOOT_SERVICE_CALL
+    str r2, [sp, #4]
 .cpu cortex-m23
 #endif
-    push {r3, lr}
-    adr r3, varm_from_nsboot_func_table
-    add r3, ip
-#if BOOTROM_32BIT_FUNC_POINTERS
-    ldr r3, [r3]
-#else
-    ldrh r3, [r3]
+#if SC_max_secure_call_num > 15
+#error
 #endif
+    lsls r3, #28
+#if BOOTROM_32BIT_FUNC_POINTERS
+    lsrs r3, #26
+#else
+    lsrs r3, #27
+#endif
+    cmp r3, #varm_from_nsboot_func_table_end - varm_from_nsboot_func_table
+    movw r2, #P16(varm_from_nsboot_func_table)
+    bhs.n varm_dead // note we checked this before in the ARM case
+    // we don't need to preserve r3, but we maintain stack alignment, and provide a place for our canary
+#if BOOTROM_32BIT_FUNC_POINTERS
+    ldr r3, [r2, r3]
+#else
+    ldrh r3, [r2, r3]
+#endif
+    ldr r2, [sp]
 #if FEATURE_CANARIES
     // Assert that we ran the boot-once check on Arm
 .cpu cortex-m33
     rcp_count_check_nodelay STEPTAG_S_FROM_NS_NSBOOT_SERVICE_CALL
 .cpu cortex-m23
 #endif
-    // hardening: done
     blx r3
 #if FEATURE_CANARIES
-    pop {r3}
+    pop {r2, r3}
 .cpu cortex-m33
     rcp_canary_check_nodelay r3, CTAG_S_FROM_NS_NSBOOT_SERVICE_CALL
     // note under ARM our SG caller takes care of clearing r1-r3
 .cpu cortex-m23
     // hardening: done
-    pop {pc}
+    pop {pc} // note we are returning a canary here in r3, however this should be cleared on return to NS
 #else
-    pop {r3, pc}
+    pop {r2, r3, pc}
 #endif
-
 
 .cpu cortex-m33
 // Single function table, shared by Arm nsboot SG, and RISC-V SG hint.
@@ -658,48 +876,32 @@ s_from_nsboot_varm_service_call_no_boot_once_check:
 .hword \x + 1
 .endm
 #endif
-.p2align 2
-varm_from_nsboot_func_table:
-    .varm_funcptr s_varm_flash_abort_clear// s_varm_api_crit_connect_internal_flash
-    .varm_funcptr s_from_nsboot_varm_flash_page_program
-    .varm_funcptr s_from_nsboot_varm_flash_sector_erase
-    .varm_funcptr s_from_nsboot_varm_flash_read_data
-    .varm_funcptr s_varm_flash_abort
-    .varm_funcptr s_from_nsboot_varm_reboot
-    .varm_funcptr s_from_nsboot_varm_otp_access
-    .varm_funcptr s_from_nsboot_varm_ram_trash_get_uf2_target_partition
-    .varm_funcptr s_from_ns_varm_api_get_partition_table_info
-    .varm_funcptr s_from_ns_varm_api_get_sys_info
-#if FEATURE_EXEC2
-    .varm_funcptr s_from_ns_varm_picoboot_exec2
-#endif
-varm_from_nsboot_func_table_end:
 
 // put this in ASM, since i saw the GCC wasted a bunch of space formulating the table address
-// int s_varm_api_set_ns_api_permission(uint api_num, bool enabled)
+// int s_arm8_api_set_ns_api_permission(uint api_num, bool enabled)
 // r0: api index
 // r1: allowed (bool)
-.global s_varm_api_set_ns_api_permission
-s_varm_api_set_ns_api_permission:
+.global s_arm8_api_set_ns_api_permission
+s_arm8_api_set_ns_api_permission:
 #if FEATURE_CANARIES
     rcp_count_set_nodelay STEPTAG_S_VARM_API_SET_NS_API_PERMISSION
 #endif
-    cmp r0, #BOOTROM_NS_API_COUNT
-    bhs 1f
+    movs   r3, #0xc3
+    cbz r1, 1f
+    movs   r3, #0xa5
+1:
+    ldr  r2, =BOOTRAM_BASE + BOOTRAM_NS_API_PERMISSIONS_OFFSET
 #if HX_BIT_PATTERN_TRUE != 0xa500a500 || HX_BIT_PATTERN_FALSE != 0x00c300c3
 #error
 #endif
-    movs   r3, #0xc3
-    cbz r1, 3f
-    movs   r3, #0xa5
-3:
-    ldr  r2, =BOOTRAM_BASE + BOOTRAM_NS_API_PERMISSIONS_OFFSET
-    strb r3, [r0, r2]
-    movs r0, #0
-    b 2f
-1:
-    movs r0, #BOOTROM_ERROR_INVALID_ARG
-2:
+#if BOOTROM_NS_API_COUNT != 8
+#error
+#endif
+    lsrs r1, r0, #3
+    ite eq
+    strbeq r3, [r0, r2]
+    movne r1, #-BOOTROM_ERROR_INVALID_ARG
+    negs r0, r1
 #if FEATURE_CANARIES
     rcp_count_check_nodelay STEPTAG_S_VARM_API_SET_NS_API_PERMISSION
 #endif
@@ -712,23 +914,17 @@ s_from_ns_arm8_api_secure_call:
 #if FEATURE_CANARIES
     rcp_count_set_nodelay STEPTAG_S_FROM_NS_ARM8_API_SECURE_CALL
 #endif
-    push {r0, lr}
-    ldr r0, =BOOTRAM_BASE
-    ldr r0, [r0, #BOOTRAM_ALWAYS_CALLBACKS_OFFSET + BOOTROM_API_CALLBACK_secure_call * 4]
-    cbz r0, 1f
-    // tail call into secure function (we overwrite lr on the stack)
-    str r0, [sp, #4]
-    b 2f
-1:
-    // or return error and jump through original lr
-    subs r0, #-BOOTROM_ERROR_INVALID_STATE
-    str r0, [sp, #0]
-2:
+    // ip is actually the addresss of this function on entry
+    ldr ip, =BOOTRAM_BASE
+    ldr ip, [ip, #BOOTRAM_ALWAYS_CALLBACKS_OFFSET + BOOTROM_API_CALLBACK_secure_call * 4]
+    cmp ip, #0
+    itt eq
+    ldreq r0, =BOOTROM_ERROR_INVALID_STATE
+    moveq ip, lr
 #if FEATURE_CANARIES
     rcp_count_check_nodelay STEPTAG_S_FROM_NS_ARM8_API_SECURE_CALL
 #endif
-    // hardening: done
-    pop {r0, pc}
+    bx ip
 
 .global s_varm_step_safe_reset_unreset_block_wait_noinline
 .type s_varm_step_safe_reset_unreset_block_wait_noinline,%function
@@ -762,27 +958,16 @@ s_varm_step_safe_reset_unreset_block_wait_noinline:
     // hardening: done
     bx lr
 
-// DON'T FORGET TO UPDATE THE LINKER SCRIPT TOO!
-VARM_TO_PREAMBLE(s_native_crit_init_default_xip_setup_and_enter_image_thunk)
-VARM_TO_PREAMBLE(s_native_api_validate_ns_buffer)
-VARM_TO_MULTIPLEX_PREAMBLE(s_native_crit_launch_nsboot)
-VARM_TO_MULTIPLEX_PREAMBLE(s_native_crit_xip_cache_maintenance)
-
-#if !USE_64K_BOOTROM
-.section .sg_fillers
-#else
-.section .vectors, "ax"
-#endif
-
 // we clear USB SRAM (aka .bss and stack), and switch stack
 .global varm_to_s_native_secure_call_pc_sp
 .thumb_func
-varm_to_s_native_secure_call_pc_sp: // (pc, sp or 0)
+varm_to_s_native_secure_call_pc_sp: // (pc, sp or 0, a, b)
+    eors r2, r3
     movs r3, #MULTIPLEX_s_native_secure_call_pc_sp
     varm_hint HINT_MULTIPLEX
-.global s_varm_secure_call // same function but called directly under varmulet
-.thumb_func
-s_varm_secure_call:
+//.global s_varm_secure_call // same function but called directly under varmulet
+//.thumb_func
+//s_varm_secure_call:
     push {r4, r5, r6, lr} // maintain stack align to call into user code
 #if FEATURE_CANARIES
     rcp_canary_get_nodelay r6, CTAG_S_VARM_SECURE_CALL // used to check after call returns
@@ -800,10 +985,11 @@ s_varm_secure_call:
 #if FEATURE_CANARIES
     rcp_count_check_nodelay STEPTAG_S_VARM_SECURE_CALL
 #endif
+    rcp_iequal r0, r2
     // This will trap if you didn't set the Thumb bit! (Deliberate safeguard
     // against accidentally entering a RISC-V function pointer under Arm)
+    // This also deliberately causes a trap with an invalid PC (e.g. 0)
 
-    // hardening: done
     blx r0
 
     msr msplim, r5
@@ -811,41 +997,24 @@ s_varm_secure_call:
 #if !FEATURE_CANARIES
     pop {r4, r5, r6, pc}
 #else
-    // canary is popped into r2, r3 is trashed, r4-r6 & lr get their values
-    pop {r2, r3, r4, r5, r6, lr}
+    // canary is popped into r2, r3 is trashed, r4-r6  get their values
+    pop {r2, r3, r4, r5, r6}
     rcp_count_set STEPTAG_STEP8_TRY_VECTOR // used in the boot path
     rcp_canary_check_nodelay r2, CTAG_S_VARM_SECURE_CALL
-    // hardening: ok
-    bx lr
+    pop {pc}
 #endif
 
-.global s_arm8_usb_client_ns_call_thunk // (secure_stack_base, secure_stack_size)
-.thumb_func
-s_arm8_usb_client_ns_call_thunk:
-    rcp_count_check STEPTAG_NSBOOT_OTP_ADVANCE // otp should have been advcance
-    add r1, r0
-    // Set secure stack limit. Note setting SPLIM to a value greater than SP
-    // does not trigger a fault -- the fault is always on an SP-setting
-    // instruction that sets SP < SPLIM.
-    msr msplim, r0
-    // Secure SP, presumed MSP as we do not set SPSEL. (mov sp is smaller than msr msp)
-    mov sp, r1
-    // Set NonSecure stack
-    ldr r2, =USBCTRL_DPRAM_BASE + USBCTRL_DPRAM_SIZE
-    msr msp_ns, r2
 
-    // does not return
-    ldr r0, =NSBOOT_ENTRY_POINT & ~1
-    ldr r1, =PPB_BASE + M33_VTOR_OFFSET
-    adds r1, #M33_MPU_CTRL_OFFSET - M33_VTOR_OFFSET
-    movs r2, #0
-    // clear all other regs
-    ldmia r0, {r3-r12}
-    // disable MPU at the last minute
-    str r2, [r1, #0]
-    rcp_count_check STEPTAG_NSBOOT_OTP_ADVANCE + 1
-    // hardening: done
-    bxns  r0
+// DON'T FORGET TO UPDATE THE LINKER SCRIPT TOO!
+VARM_TO_MULTIPLEX_PREAMBLE(s_native_crit_launch_nsboot)
+VARM_TO_MULTIPLEX_PREAMBLE(s_native_crit_xip_cache_maintenance)
+
+
+#if !USE_64K_BOOTROM
+.section .sg_fillers
+#else
+.section .vectors, "ax"
+#endif
 
 .section .rodata.keep
 .p2align 2
@@ -857,6 +1026,25 @@ partition_table_ptr:
 flash_devinfo16_ptr:
 .word BOOTRAM_BASE + BOOTRAM_ALWAYS_FLASH_DEVINFO_OFFSET
 
+// if 0 we can use the BOOTRAM_BASE constant from elsewhere
+#if 1 || BOOTRAM_XIP_SETUP_CODE_OFFSET != 0
 xip_setup_func_ptr:
 .word BOOTRAM_BASE + BOOTRAM_XIP_SETUP_CODE_OFFSET
+#endif
 
+.global varm_from_nsboot_func_table
+varm_from_nsboot_func_table:
+    .varm_funcptr s_varm_flash_abort_clear// s_varm_api_crit_connect_internal_flash
+    .varm_funcptr s_from_nsboot_varm_flash_page_program
+    .varm_funcptr s_from_nsboot_varm_flash_sector_erase
+    .varm_funcptr s_from_nsboot_varm_flash_read_data
+    .varm_funcptr s_varm_flash_abort
+    .varm_funcptr s_from_nsboot_varm_reboot
+    .varm_funcptr s_from_nsboot_varm_otp_access
+    .varm_funcptr s_from_nsboot_varm_ram_trash_get_uf2_target_partition
+    .varm_funcptr s_from_ns_varm_api_get_partition_table_info
+    .varm_funcptr s_from_ns_varm_api_get_sys_info
+#if FEATURE_EXEC2
+    .varm_funcptr s_from_ns_varm_picoboot_exec2
+#endif
+varm_from_nsboot_func_table_end:
